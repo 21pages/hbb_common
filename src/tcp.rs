@@ -63,6 +63,7 @@ impl DerefMut for DynTcpStream {
 }
 
 pub(crate) fn new_socket(addr: std::net::SocketAddr, reuse: bool) -> Result<TcpSocket, std::io::Error> {
+    log::info!("new_socket");
     let socket = match addr {
         std::net::SocketAddr::V4(..) => TcpSocket::new_v4()?,
         std::net::SocketAddr::V6(..) => TcpSocket::new_v6()?,
@@ -72,10 +73,17 @@ pub(crate) fn new_socket(addr: std::net::SocketAddr, reuse: bool) -> Result<TcpS
         // almost equals to unix's reuse_port + reuse_address,
         // though may introduce nondeterministic behavior
         #[cfg(unix)]
-        socket.set_reuseport(true).ok();
-        socket.set_reuseaddr(true).ok();
+        {
+            let res = socket.set_reuseport(true);
+            log::info!("new_socket: set_reuseport(true).ok(): {:?}", res);
+        }
+        let res = socket.set_reuseaddr(true);
+        log::info!("new_socket: set_reuseaddr(true).ok(): {:?}", res);
     }
-    socket.bind(addr)?;
+    let res = socket.bind(addr);
+    log::info!("new_socket: bind(addr): {:?}", res);
+    res?;
+    log::info!("new_socket: bind(addr) ok");
     Ok(socket)
 }
 
@@ -223,16 +231,26 @@ pub async fn new_listener<T: ToSocketAddrs>(addr: T, reuse: bool) -> ResultType<
 }
 
 pub async fn listen_any(port: u16) -> ResultType<TcpListener> {
+    log::info!("listen_any {}", port);
     if let Ok(mut socket) = TcpSocket::new_v6() {
+        log::info!("TcpSocket::new_v6");
         #[cfg(unix)]
         {
-            socket.set_reuseport(true).ok();
-            socket.set_reuseaddr(true).ok();
+            let res = socket.set_reuseport(true);
+            log::info!("socket.set_reuseport(true): {:?}", res);
+            let res = socket.set_reuseaddr(true);
+            log::info!("socket.set_reuseaddr(true): {:?}", res);
             use std::os::unix::io::{FromRawFd, IntoRawFd};
             let raw_fd = socket.into_raw_fd();
+            log::info!("socket.into_raw_fd()");
             let sock2 = unsafe { socket2::Socket::from_raw_fd(raw_fd) };
-            sock2.set_only_v6(false).ok();
-            socket = unsafe { TcpSocket::from_raw_fd(sock2.into_raw_fd()) };
+            log::info!("socket2::Socket::from_raw_fd(raw_fd)");
+            let res = sock2.set_only_v6(false);
+            log::info!("sock2.set_only_v6(false): {:?}", res);
+            let raw_fd = sock2.into_raw_fd();
+            log::info!("sock2.into_raw_fd()");
+            socket = unsafe { TcpSocket::from_raw_fd(raw_fd) };
+            log::info!("socket = unsafe from_raw_fd(raw_fd)");
         }
         #[cfg(windows)]
         {
@@ -247,8 +265,13 @@ pub async fn listen_any(port: u16) -> ResultType<TcpListener> {
             .is_ok()
         {
             if let Ok(l) = socket.listen(DEFAULT_BACKLOG) {
+                log::info!("socket.listen(DEFAULT_BACKLOG) ok");
                 return Ok(l);
+            } else {
+                log::error!("socket.listen(DEFAULT_BACKLOG) error");
             }
+        } else {
+            log::error!("socket.bind(SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port)).is_ok() error");
         }
     }
     Ok(new_socket(

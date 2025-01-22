@@ -196,14 +196,35 @@ static mut CACHED_FINGERPRINTS: Option<HashMap<String, Vec<u8>>> = None;
 
 impl FingerprintingInfo {
     fn new() -> Self {
+        log::info!("FingerprintingInfo::new");
         let mut sys = System::new();
+        log::info!("System::new");
         sys.refresh_cpu();
+        log::info!("sys.refresh_cpu");
         let cpu = sys.cpus().first();
         let id = {
             let mut id = crate::config::Config::get_id();
             id.truncate(16);
             format!("{:<16}", id)
         };
+        log::info!("id: {:?}", id);
+
+        let brand = cpu.map(|cpu| cpu.brand().to_string()).unwrap_or_default();
+        log::info!("brand: {:?}", brand);
+
+        let speed_max = cpu
+            .map(|cpu| cpu.frequency().to_string())
+            .unwrap_or_default();
+        log::info!("speed_max: {:?}", speed_max);
+
+        let cores = sys.cpus().len().to_string();
+        log::info!("cores: {:?}", cores);
+
+        let physical_cores = sys.physical_core_count().unwrap_or(1).to_string();
+        log::info!("physical_cores: {:?}", physical_cores);
+
+        let mem_total = sys.total_memory().to_string();
+        log::info!("mem_total: {:?}", mem_total);
 
         FingerprintingInfo {
             eol: if cfg!(windows) { "\r\n" } else { "\n" }.to_string(),
@@ -213,13 +234,11 @@ impl FingerprintingInfo {
                 "LE"
             }
             .to_string(),
-            brand: cpu.map(|cpu| cpu.brand().to_string()).unwrap_or_default(),
-            speed_max: cpu
-                .map(|cpu| cpu.frequency().to_string())
-                .unwrap_or_default(),
-            cores: sys.cpus().len().to_string(),
-            physical_cores: sys.physical_core_count().unwrap_or(1).to_string(),
-            mem_total: sys.total_memory().to_string(),
+            brand,
+            speed_max,
+            cores,
+            physical_cores,
+            mem_total,
             platform: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),
             id,
@@ -227,13 +246,17 @@ impl FingerprintingInfo {
             addr: "0".repeat(16),
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             addr: {
+                log::info!("addr");
                 let mut addr = default_net::get_mac().map(|m| m.addr).unwrap_or_default();
+                log::info!("addr2");
                 if addr.is_empty() {
+                    log::info!("addr3");
                     addr = mac_address::get_mac_address()
                         .ok()
                         .and_then(|mac| mac)
                         .map(|mac| mac.to_string())
                         .unwrap_or_else(|| "".to_string());
+                    log::info!("addr4");
                 }
                 addr = addr.replace(":", "");
                 format!("{:0<16}", addr)
@@ -254,6 +277,7 @@ pub fn get_fingerprinting_info() -> FingerprintingInfo {
 }
 
 pub fn get_fingerprint(only: Option<Vec<String>>, except: Option<Vec<String>>) -> Vec<u8> {
+    log::info!("get_fingerprint");
     let all_parameters = vec![
         "eol".to_string(),
         "endianness".to_string(),
@@ -354,6 +378,7 @@ impl Sha512Hasher {
 }
 
 fn calculate_fingerprint(parameters: &[String]) -> Vec<u8> {
+    log::info!("calculate_fingerprint");
     let info = get_fingerprinting_info();
 
     let mut hasher = Sha512Hasher::new();
@@ -377,5 +402,7 @@ fn calculate_fingerprint(parameters: &[String]) -> Vec<u8> {
         .collect::<Vec<&str>>()
         .join("");
     hasher.update(fingerprint_string.as_bytes());
-    hasher.finalize()
+    let result = hasher.finalize();
+    log::info!("calculate_fingerprint finished");
+    result
 }
