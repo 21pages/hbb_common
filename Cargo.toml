@@ -47,7 +47,7 @@ sha2 = "0.10"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 mac_address = "1.1"
-default_net = { git = "https://github.com/rustdesk-org/default_net" }
+default_net = { git = "https://github.com/21pages/default_net", branch = "fix" }
 machine-uid = { git = "https://github.com/rustdesk-org/machine-uid" }
 [target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]
 tokio-rustls = { version = "0.26", features = ["logging", "tls12", "ring"], default-features = false }
