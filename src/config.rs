@@ -21,7 +21,7 @@ use sodiumoxide::crypto::sign;
 
 use crate::{
     compress::{compress, decompress},
-    log,
+    is_client, is_full, is_host, is_sos, log,
     password_security::{
         decrypt_str_or_original, decrypt_vec_or_original, encrypt_str_or_original,
         encrypt_vec_or_original, symmetric_crypt,
@@ -58,7 +58,15 @@ lazy_static::lazy_static! {
     static ref ONLINE: Mutex<HashMap<String, i64>> = Default::default();
     pub static ref PROD_RENDEZVOUS_SERVER: RwLock<String> = RwLock::new("".to_owned());
     pub static ref EXE_RENDEZVOUS_SERVER: RwLock<String> = Default::default();
-    pub static ref APP_NAME: RwLock<String> = RwLock::new("RustDesk".to_owned());
+    pub static ref APP_NAME: RwLock<String> = {
+        let name = match crate::CLIENT_TYPE {
+            crate::ClientType::Full => "RustDesk-Full",
+            crate::ClientType::Host => "RustDesk-Host",
+            crate::ClientType::Client => "RustDesk-Client",
+            crate::ClientType::Sos => "RustDesk-SOS",
+        };
+        RwLock::new(name.to_owned())
+    };
     static ref KEY_PAIR: Mutex<Option<KeyPair>> = Default::default();
     static ref USER_DEFAULT_CONFIG: RwLock<(UserDefaultConfig, Instant)> = RwLock::new((UserDefaultConfig::load(), Instant::now()));
     pub static ref NEW_STORED_PEER_CONFIG: Mutex<HashSet<String>> = Default::default();
@@ -2174,6 +2182,12 @@ pub struct GroupPeer {
         skip_serializing_if = "String::is_empty"
     )]
     pub login_name: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub user: String,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
@@ -2184,6 +2198,12 @@ pub struct GroupUser {
         skip_serializing_if = "String::is_empty"
     )]
     pub name: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub user: String,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
@@ -2320,20 +2340,12 @@ fn is_option_can_save(
 
 #[inline]
 pub fn is_incoming_only() -> bool {
-    HARD_SETTINGS
-        .read()
-        .unwrap()
-        .get("conn-type")
-        .map_or(false, |x| x == ("incoming"))
+    is_host() || is_sos()
 }
 
 #[inline]
 pub fn is_outgoing_only() -> bool {
-    HARD_SETTINGS
-        .read()
-        .unwrap()
-        .get("conn-type")
-        .map_or(false, |x| x == ("outgoing"))
+    is_client()
 }
 
 #[inline]
@@ -2362,12 +2374,12 @@ pub fn is_disable_ab() -> bool {
 
 #[inline]
 pub fn is_disable_account() -> bool {
-    is_some_hard_opton("disable-account")
+    is_sos() || is_host()
 }
 
 #[inline]
 pub fn is_disable_installation() -> bool {
-    is_some_hard_opton("disable-installation")
+    is_sos()
 }
 
 // This function must be kept the same as the one in flutter and sciter code.
