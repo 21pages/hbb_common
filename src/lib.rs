@@ -57,10 +57,34 @@ pub use toml;
 pub use uuid;
 pub mod fingerprint;
 pub use flexi_logger;
-pub mod websocket;
 pub mod stream;
+pub mod websocket;
 pub use stream::Stream;
 pub use whoami;
+
+const HOST_APP_NAME: &str = "RustDesk-Host";
+const CLIENT_APP_NAME: &str = "RustDesk-Client";
+const SOS_APP_NAME: &str = "RustDesk-SOS";
+
+pub fn is_standard() -> bool {
+    let app_name = config::APP_NAME.read().unwrap().clone();
+    app_name != HOST_APP_NAME && app_name != SOS_APP_NAME && app_name != CLIENT_APP_NAME
+}
+
+pub fn is_host() -> bool {
+    let app_name = config::APP_NAME.read().unwrap().clone();
+    app_name == HOST_APP_NAME
+}
+
+pub fn is_client() -> bool {
+    let app_name = config::APP_NAME.read().unwrap().clone();
+    app_name == CLIENT_APP_NAME
+}
+
+pub fn is_sos() -> bool {
+    let app_name = config::APP_NAME.read().unwrap().clone();
+    app_name == SOS_APP_NAME
+}
 
 pub type SessionID = uuid::Uuid;
 
