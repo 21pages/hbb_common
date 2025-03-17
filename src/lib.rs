@@ -62,6 +62,44 @@ pub mod stream;
 pub use stream::Stream;
 pub use whoami;
 
+pub enum ClientType {
+    Full,
+    Host,
+    Client,
+    Sos,
+}
+
+const CLIENT_TYPE: ClientType = ClientType::Full;
+
+pub fn is_full() -> bool {
+    match CLIENT_TYPE {
+        ClientType::Full => true,
+        _ => false,
+    }
+}
+
+pub fn is_host() -> bool {
+    match CLIENT_TYPE {
+        ClientType::Host => true,
+        _ => false,
+    }
+}
+
+pub fn is_client() -> bool {
+    match CLIENT_TYPE {
+        ClientType::Client => true,
+        _ => false,
+    }
+}
+
+pub fn is_sos() -> bool {
+    match CLIENT_TYPE {
+        ClientType::Sos => true,
+        _ => false,
+    }
+}
+
+
 pub type SessionID = uuid::Uuid;
 
 #[inline]

@@ -1,3 +1,10 @@
+use regex::Regex;
+use std::{
+    fs,
+    io::{Read, Write},
+    path::Path,
+};
+
 fn main() {
     let out_dir = format!("{}/protos", std::env::var("OUT_DIR").unwrap());
 
@@ -12,3 +19,4 @@ fn main() {
         .run()
         .expect("Codegen failed.");
 }
+
