@@ -21,7 +21,7 @@ use sodiumoxide::crypto::sign;
 
 use crate::{
     compress::{compress, decompress},
-    log,
+    is_client, is_host, is_sos, is_standard, log,
     password_security::{
         decrypt_str_or_original, decrypt_vec_or_original, encrypt_str_or_original,
         encrypt_vec_or_original, symmetric_crypt,
@@ -59,6 +59,7 @@ lazy_static::lazy_static! {
     pub static ref PROD_RENDEZVOUS_SERVER: RwLock<String> = RwLock::new("".to_owned());
     pub static ref EXE_RENDEZVOUS_SERVER: RwLock<String> = Default::default();
     pub static ref APP_NAME: RwLock<String> = RwLock::new("RustDesk".to_owned());
+
     static ref KEY_PAIR: Mutex<Option<KeyPair>> = Default::default();
     static ref USER_DEFAULT_CONFIG: RwLock<(UserDefaultConfig, Instant)> = RwLock::new((UserDefaultConfig::load(), Instant::now()));
     pub static ref NEW_STORED_PEER_CONFIG: Mutex<HashSet<String>> = Default::default();
@@ -70,6 +71,8 @@ lazy_static::lazy_static! {
     pub static ref OVERWRITE_LOCAL_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
     pub static ref HARD_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
     pub static ref BUILTIN_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+    pub static ref STRATEGY_OVERRIDE_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+    pub static ref STRATEGY_HARD_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
 }
 
 lazy_static::lazy_static! {
@@ -986,13 +989,22 @@ impl Config {
     pub fn get_options() -> HashMap<String, String> {
         let mut res = DEFAULT_SETTINGS.read().unwrap().clone();
         res.extend(CONFIG2.read().unwrap().options.clone());
+        res.extend(STRATEGY_OVERRIDE_SETTINGS.read().unwrap().clone());
         res.extend(OVERWRITE_SETTINGS.read().unwrap().clone());
         res
     }
 
     #[inline]
     fn purify_options(v: &mut HashMap<String, String>) {
-        v.retain(|k, v| is_option_can_save(&OVERWRITE_SETTINGS, k, &DEFAULT_SETTINGS, v));
+        v.retain(|k, v| {
+            is_option_can_save(
+                &OVERWRITE_SETTINGS,
+                &STRATEGY_OVERRIDE_SETTINGS,
+                k,
+                &DEFAULT_SETTINGS,
+                v,
+            )
+        });
     }
 
     pub fn set_options(mut v: HashMap<String, String>) {
@@ -1008,6 +1020,7 @@ impl Config {
     pub fn get_option(k: &str) -> String {
         get_or(
             &OVERWRITE_SETTINGS,
+            &STRATEGY_OVERRIDE_SETTINGS,
             &CONFIG2.read().unwrap().options,
             &DEFAULT_SETTINGS,
             k,
@@ -1020,7 +1033,13 @@ impl Config {
     }
 
     pub fn set_option(k: String, v: String) {
-        if !is_option_can_save(&OVERWRITE_SETTINGS, &k, &DEFAULT_SETTINGS, &v) {
+        if !is_option_can_save(
+            &OVERWRITE_SETTINGS,
+            &STRATEGY_OVERRIDE_SETTINGS,
+            &k,
+            &DEFAULT_SETTINGS,
+            &v,
+        ) {
             return;
         }
         let mut config = CONFIG2.write().unwrap();
@@ -1098,6 +1117,13 @@ impl Config {
         {
             return;
         }
+        if STRATEGY_OVERRIDE_SETTINGS
+            .read()
+            .unwrap()
+            .contains_key(keys::OPTION_PROXY_URL)
+        {
+            return;
+        }
 
         let mut config = CONFIG2.write().unwrap();
         if config.socks == socks {
@@ -1156,6 +1182,9 @@ impl Config {
 
     pub fn get_socks() -> Option<Socks5Server> {
         Self::get_socks_from_custom_client_advanced_settings(&OVERWRITE_SETTINGS.read().unwrap())
+            .or(Self::get_socks_from_custom_client_advanced_settings(
+                &STRATEGY_OVERRIDE_SETTINGS.read().unwrap(),
+            ))
             .or(CONFIG2.read().unwrap().socks.clone())
             .or(Self::get_socks_from_custom_client_advanced_settings(
                 &DEFAULT_SETTINGS.read().unwrap(),
@@ -1169,6 +1198,14 @@ impl Config {
 
     pub fn get_network_type() -> NetworkType {
         if OVERWRITE_SETTINGS
+            .read()
+            .unwrap()
+            .get(keys::OPTION_PROXY_URL)
+            .is_some()
+        {
+            return NetworkType::ProxySocks;
+        }
+        if STRATEGY_OVERRIDE_SETTINGS
             .read()
             .unwrap()
             .get(keys::OPTION_PROXY_URL)
@@ -1766,6 +1803,7 @@ impl LocalConfig {
     pub fn get_option(k: &str) -> String {
         get_or(
             &OVERWRITE_LOCAL_SETTINGS,
+            &STRATEGY_OVERRIDE_SETTINGS,
             &LOCAL_CONFIG.read().unwrap().options,
             &DEFAULT_LOCAL_SETTINGS,
             k,
@@ -1777,6 +1815,7 @@ impl LocalConfig {
     pub fn get_option_from_file(k: &str) -> String {
         get_or(
             &OVERWRITE_LOCAL_SETTINGS,
+            &STRATEGY_OVERRIDE_SETTINGS,
             &Self::load().options,
             &DEFAULT_LOCAL_SETTINGS,
             k,
@@ -1789,7 +1828,13 @@ impl LocalConfig {
     }
 
     pub fn set_option(k: String, v: String) {
-        if !is_option_can_save(&OVERWRITE_LOCAL_SETTINGS, &k, &DEFAULT_LOCAL_SETTINGS, &v) {
+        if !is_option_can_save(
+            &OVERWRITE_LOCAL_SETTINGS,
+            &STRATEGY_OVERRIDE_SETTINGS,
+            &k,
+            &DEFAULT_LOCAL_SETTINGS,
+            &v,
+        ) {
             return;
         }
         let mut config = LOCAL_CONFIG.write().unwrap();
@@ -1814,6 +1859,7 @@ impl LocalConfig {
     pub fn get_flutter_option(k: &str) -> String {
         get_or(
             &OVERWRITE_LOCAL_SETTINGS,
+            &STRATEGY_OVERRIDE_SETTINGS,
             &LOCAL_CONFIG.read().unwrap().ui_flutter,
             &DEFAULT_LOCAL_SETTINGS,
             k,
@@ -1946,6 +1992,7 @@ impl UserDefaultConfig {
     pub fn set(&mut self, key: String, value: String) {
         if !is_option_can_save(
             &OVERWRITE_DISPLAY_SETTINGS,
+            &STRATEGY_OVERRIDE_SETTINGS,
             &key,
             &DEFAULT_DISPLAY_SETTINGS,
             &value,
@@ -1995,6 +2042,7 @@ impl UserDefaultConfig {
     fn get_after(&self, k: &str) -> Option<String> {
         get_or(
             &OVERWRITE_DISPLAY_SETTINGS,
+            &STRATEGY_OVERRIDE_SETTINGS,
             &self.options,
             &DEFAULT_DISPLAY_SETTINGS,
             k,
@@ -2174,6 +2222,12 @@ pub struct GroupPeer {
         skip_serializing_if = "String::is_empty"
     )]
     pub login_name: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub user: String,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
@@ -2184,6 +2238,12 @@ pub struct GroupUser {
         skip_serializing_if = "String::is_empty"
     )]
     pub name: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub user: String,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
@@ -2291,26 +2351,30 @@ deserialize_default!(deserialize_hashmap_resolutions, HashMap<String, Resolution
 #[inline]
 fn get_or(
     a: &RwLock<HashMap<String, String>>,
-    b: &HashMap<String, String>,
-    c: &RwLock<HashMap<String, String>>,
+    b: &RwLock<HashMap<String, String>>,
+    c: &HashMap<String, String>,
+    d: &RwLock<HashMap<String, String>>,
     k: &str,
 ) -> Option<String> {
     a.read()
         .unwrap()
         .get(k)
-        .or(b.get(k))
-        .or(c.read().unwrap().get(k))
+        .or(b.read().unwrap().get(k))
+        .or(c.get(k))
+        .or(d.read().unwrap().get(k))
         .cloned()
 }
 
 #[inline]
 fn is_option_can_save(
     overwrite: &RwLock<HashMap<String, String>>,
+    strategy_override: &RwLock<HashMap<String, String>>,
     k: &str,
     defaults: &RwLock<HashMap<String, String>>,
     v: &str,
 ) -> bool {
     if overwrite.read().unwrap().contains_key(k)
+        || strategy_override.read().unwrap().contains_key(k)
         || defaults.read().unwrap().get(k).map_or(false, |x| x == v)
     {
         return false;
@@ -2320,29 +2384,36 @@ fn is_option_can_save(
 
 #[inline]
 pub fn is_incoming_only() -> bool {
-    HARD_SETTINGS
-        .read()
-        .unwrap()
-        .get("conn-type")
-        .map_or(false, |x| x == ("incoming"))
+    is_host()
+        || is_sos()
+        || (is_standard()
+            && HARD_SETTINGS
+                .read()
+                .unwrap()
+                .get("conn-type")
+                .map_or(false, |x| x == ("incoming")))
 }
 
 #[inline]
 pub fn is_outgoing_only() -> bool {
-    HARD_SETTINGS
-        .read()
-        .unwrap()
-        .get("conn-type")
-        .map_or(false, |x| x == ("outgoing"))
+    is_client()
+        || (is_standard()
+            && HARD_SETTINGS
+                .read()
+                .unwrap()
+                .get("conn-type")
+                .map_or(false, |x| x == ("outgoing")))
 }
 
 #[inline]
 fn is_some_hard_opton(name: &str) -> bool {
-    HARD_SETTINGS
-        .read()
-        .unwrap()
-        .get(name)
-        .map_or(false, |x| x == ("Y"))
+    if let Some(value) = HARD_SETTINGS.read().unwrap().get(name) {
+        return value == "Y";
+    }
+    if let Some(value) = STRATEGY_HARD_SETTINGS.read().unwrap().get(name) {
+        return value == "Y";
+    }
+    false
 }
 
 #[inline]
@@ -2362,12 +2433,12 @@ pub fn is_disable_ab() -> bool {
 
 #[inline]
 pub fn is_disable_account() -> bool {
-    is_some_hard_opton("disable-account")
+    is_sos() || is_host() || (is_standard() && is_some_hard_opton("disable-account"))
 }
 
 #[inline]
 pub fn is_disable_installation() -> bool {
-    is_some_hard_opton("disable-installation")
+    is_sos() || is_some_hard_opton("disable-installation")
 }
 
 // This function must be kept the same as the one in flutter and sciter code.
@@ -2609,6 +2680,7 @@ pub mod keys {
         OPTION_VIDEO_SAVE_DIRECTORY,
         OPTION_ENABLE_UDP_PUNCH,
         OPTION_ENABLE_IPV6_PUNCH,
+        OPTION_ENABLE_CHECK_UPDATE,
     ];
     // DEFAULT_SETTINGS, OVERWRITE_SETTINGS
     pub const KEYS_SETTINGS: &[&str] = &[
@@ -2654,6 +2726,7 @@ pub mod keys {
         OPTION_ENABLE_DIRECTX_CAPTURE,
         OPTION_ENABLE_ANDROID_SOFTWARE_ENCODING_HALF_SCALE,
         OPTION_ENABLE_TRUSTED_DEVICES,
+        OPTION_ALLOW_AUTO_UPDATE,
     ];
 
     // BUILDIN_SETTINGS
