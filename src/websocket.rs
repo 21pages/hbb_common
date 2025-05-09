@@ -245,16 +245,7 @@ pub fn check_ws(endpoint: &str) -> String {
         let domain_path = if relay { "/ws/relay" } else { "/ws/id" };
         (format!("{}{}", endpoint_host, domain_path), true)
     };
-    let protocol = if is_domain {
-        let api_server = Config::get_option("api-server");
-        if api_server.starts_with("https") {
-            "wss"
-        } else {
-            "ws"
-        }
-    } else {
-        "ws"
-    };
+    let protocol = if is_domain { "wss" } else { "ws" };
     format!("{}://{}", protocol, address)
 }
 
