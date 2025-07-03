@@ -21,7 +21,7 @@ use sodiumoxide::crypto::sign;
 
 use crate::{
     compress::{compress, decompress},
-    is_client, is_full, is_host, is_sos, log,
+    is_client, is_host, is_sos, log,
     password_security::{
         decrypt_str_or_original, decrypt_vec_or_original, encrypt_str_or_original,
         encrypt_vec_or_original, symmetric_crypt,
@@ -78,6 +78,9 @@ lazy_static::lazy_static! {
     pub static ref OVERWRITE_LOCAL_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
     pub static ref HARD_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
     pub static ref BUILTIN_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+    pub static ref STRATEGY_OVERRIDE_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+    pub static ref STRATEGY_HARD_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+
 }
 
 lazy_static::lazy_static! {
@@ -963,7 +966,9 @@ impl Config {
     }
 
     pub fn no_register_device() -> bool {
-        BUILTIN_SETTINGS.read().unwrap()
+        BUILTIN_SETTINGS
+            .read()
+            .unwrap()
             .get(keys::OPTION_REGISTER_DEVICE)
             .map(|v| v == "N")
             .unwrap_or(false)
@@ -992,13 +997,22 @@ impl Config {
     pub fn get_options() -> HashMap<String, String> {
         let mut res = DEFAULT_SETTINGS.read().unwrap().clone();
         res.extend(CONFIG2.read().unwrap().options.clone());
+        res.extend(STRATEGY_OVERRIDE_SETTINGS.read().unwrap().clone());
         res.extend(OVERWRITE_SETTINGS.read().unwrap().clone());
         res
     }
 
     #[inline]
     fn purify_options(v: &mut HashMap<String, String>) {
-        v.retain(|k, v| is_option_can_save(&OVERWRITE_SETTINGS, k, &DEFAULT_SETTINGS, v));
+        v.retain(|k, v| {
+            is_option_can_save(
+                &OVERWRITE_SETTINGS,
+                &STRATEGY_OVERRIDE_SETTINGS,
+                k,
+                &DEFAULT_SETTINGS,
+                v,
+            )
+        });
     }
 
     pub fn set_options(mut v: HashMap<String, String>) {
@@ -1014,6 +1028,7 @@ impl Config {
     pub fn get_option(k: &str) -> String {
         get_or(
             &OVERWRITE_SETTINGS,
+            &STRATEGY_OVERRIDE_SETTINGS.read().unwrap(),
             &CONFIG2.read().unwrap().options,
             &DEFAULT_SETTINGS,
             k,
@@ -1026,7 +1041,13 @@ impl Config {
     }
 
     pub fn set_option(k: String, v: String) {
-        if !is_option_can_save(&OVERWRITE_SETTINGS, &k, &DEFAULT_SETTINGS, &v) {
+        if !is_option_can_save(
+            &OVERWRITE_SETTINGS,
+            &STRATEGY_OVERRIDE_SETTINGS,
+            &k,
+            &DEFAULT_SETTINGS,
+            &v,
+        ) {
             return;
         }
         let mut config = CONFIG2.write().unwrap();
@@ -1059,6 +1080,14 @@ impl Config {
         {
             return;
         }
+        if STRATEGY_HARD_SETTINGS
+            .read()
+            .unwrap()
+            .get("password")
+            .map_or(false, |v| v == password)
+        {
+            return;
+        }
         let mut config = CONFIG.write().unwrap();
         if password == config.password {
             return;
@@ -1072,6 +1101,11 @@ impl Config {
         let mut password = CONFIG.read().unwrap().password.clone();
         if password.is_empty() {
             if let Some(v) = HARD_SETTINGS.read().unwrap().get("password") {
+                password = v.to_owned();
+            }
+        }
+        if password.is_empty() {
+            if let Some(v) = STRATEGY_HARD_SETTINGS.read().unwrap().get("password") {
                 password = v.to_owned();
             }
         }
@@ -1098,6 +1132,13 @@ impl Config {
 
     pub fn set_socks(socks: Option<Socks5Server>) {
         if OVERWRITE_SETTINGS
+            .read()
+            .unwrap()
+            .contains_key(keys::OPTION_PROXY_URL)
+        {
+            return;
+        }
+        if STRATEGY_OVERRIDE_SETTINGS
             .read()
             .unwrap()
             .contains_key(keys::OPTION_PROXY_URL)
@@ -1162,6 +1203,9 @@ impl Config {
 
     pub fn get_socks() -> Option<Socks5Server> {
         Self::get_socks_from_custom_client_advanced_settings(&OVERWRITE_SETTINGS.read().unwrap())
+            .or(Self::get_socks_from_custom_client_advanced_settings(
+                &STRATEGY_OVERRIDE_SETTINGS.read().unwrap(),
+            ))
             .or(CONFIG2.read().unwrap().socks.clone())
             .or(Self::get_socks_from_custom_client_advanced_settings(
                 &DEFAULT_SETTINGS.read().unwrap(),
@@ -1175,6 +1219,14 @@ impl Config {
 
     pub fn get_network_type() -> NetworkType {
         if OVERWRITE_SETTINGS
+            .read()
+            .unwrap()
+            .get(keys::OPTION_PROXY_URL)
+            .is_some()
+        {
+            return NetworkType::ProxySocks;
+        }
+        if STRATEGY_OVERRIDE_SETTINGS
             .read()
             .unwrap()
             .get(keys::OPTION_PROXY_URL)
@@ -1772,6 +1824,7 @@ impl LocalConfig {
     pub fn get_option(k: &str) -> String {
         get_or(
             &OVERWRITE_LOCAL_SETTINGS,
+            &STRATEGY_OVERRIDE_SETTINGS.read().unwrap(),
             &LOCAL_CONFIG.read().unwrap().options,
             &DEFAULT_LOCAL_SETTINGS,
             k,
@@ -1783,6 +1836,7 @@ impl LocalConfig {
     pub fn get_option_from_file(k: &str) -> String {
         get_or(
             &OVERWRITE_LOCAL_SETTINGS,
+            &STRATEGY_OVERRIDE_SETTINGS.read().unwrap(),
             &Self::load().options,
             &DEFAULT_LOCAL_SETTINGS,
             k,
@@ -1795,7 +1849,13 @@ impl LocalConfig {
     }
 
     pub fn set_option(k: String, v: String) {
-        if !is_option_can_save(&OVERWRITE_LOCAL_SETTINGS, &k, &DEFAULT_LOCAL_SETTINGS, &v) {
+        if !is_option_can_save(
+            &OVERWRITE_LOCAL_SETTINGS,
+            &STRATEGY_OVERRIDE_SETTINGS,
+            &k,
+            &DEFAULT_LOCAL_SETTINGS,
+            &v,
+        ) {
             return;
         }
         let mut config = LOCAL_CONFIG.write().unwrap();
@@ -1820,6 +1880,7 @@ impl LocalConfig {
     pub fn get_flutter_option(k: &str) -> String {
         get_or(
             &OVERWRITE_LOCAL_SETTINGS,
+            &STRATEGY_OVERRIDE_SETTINGS.read().unwrap(),
             &LOCAL_CONFIG.read().unwrap().ui_flutter,
             &DEFAULT_LOCAL_SETTINGS,
             k,
@@ -1906,7 +1967,7 @@ pub struct UserDefaultConfig {
 }
 
 impl UserDefaultConfig {
-    fn read(key: &str) -> String {
+    pub fn read(key: &str) -> String {
         let mut cfg = USER_DEFAULT_CONFIG.write().unwrap();
         // we do so, because default config may changed in another process, but we don't sync it
         // but no need to read every time, give a small interval to avoid too many redundant read waste
@@ -1952,6 +2013,7 @@ impl UserDefaultConfig {
     pub fn set(&mut self, key: String, value: String) {
         if !is_option_can_save(
             &OVERWRITE_DISPLAY_SETTINGS,
+            &STRATEGY_OVERRIDE_SETTINGS,
             &key,
             &DEFAULT_DISPLAY_SETTINGS,
             &value,
@@ -2001,6 +2063,7 @@ impl UserDefaultConfig {
     fn get_after(&self, k: &str) -> Option<String> {
         get_or(
             &OVERWRITE_DISPLAY_SETTINGS,
+            &STRATEGY_OVERRIDE_SETTINGS.read().unwrap(),
             &self.options,
             &DEFAULT_DISPLAY_SETTINGS,
             k,
@@ -2310,25 +2373,29 @@ deserialize_default!(deserialize_hashmap_resolutions, HashMap<String, Resolution
 fn get_or(
     a: &RwLock<HashMap<String, String>>,
     b: &HashMap<String, String>,
-    c: &RwLock<HashMap<String, String>>,
+    c: &HashMap<String, String>,
+    d: &RwLock<HashMap<String, String>>,
     k: &str,
 ) -> Option<String> {
     a.read()
         .unwrap()
         .get(k)
         .or(b.get(k))
-        .or(c.read().unwrap().get(k))
+        .or(c.get(k))
+        .or(d.read().unwrap().get(k))
         .cloned()
 }
 
 #[inline]
 fn is_option_can_save(
     overwrite: &RwLock<HashMap<String, String>>,
+    strategy_override: &RwLock<HashMap<String, String>>,
     k: &str,
     defaults: &RwLock<HashMap<String, String>>,
     v: &str,
 ) -> bool {
     if overwrite.read().unwrap().contains_key(k)
+        || strategy_override.read().unwrap().contains_key(k)
         || defaults.read().unwrap().get(k).map_or(false, |x| x == v)
     {
         return false;
@@ -2348,11 +2415,17 @@ pub fn is_outgoing_only() -> bool {
 
 #[inline]
 fn is_some_hard_opton(name: &str) -> bool {
-    HARD_SETTINGS
+    let custom_client_option = HARD_SETTINGS
         .read()
         .unwrap()
         .get(name)
-        .map_or(false, |x| x == ("Y"))
+        .map_or(false, |x| x == ("Y"));
+    let strategy_option = STRATEGY_HARD_SETTINGS
+        .read()
+        .unwrap()
+        .get(name)
+        .map_or(false, |x| x == ("Y"));
+    custom_client_option || strategy_option
 }
 
 #[inline]
@@ -2504,7 +2577,7 @@ pub mod keys {
     pub const OPTION_HIDE_PROXY_SETTINGS: &str = "hide-proxy-settings";
     pub const OPTION_HIDE_REMOTE_PRINTER_SETTINGS: &str = "hide-remote-printer-settings";
     pub const OPTION_HIDE_WEBSOCKET_SETTINGS: &str = "hide-websocket-settings";
-    
+
     // Connection punch-through options
     pub const OPTION_ENABLE_UDP_PUNCH: &str = "enable-udp-punch";
     pub const OPTION_ENABLE_IPV6_PUNCH: &str = "enable-ipv6-punch";
@@ -2691,7 +2764,6 @@ pub mod keys {
         OPTION_HIDE_POWERED_BY_ME,
     ];
 }
-
 
 pub fn common_load<
     T: serde::Serialize + serde::de::DeserializeOwned + Default + std::fmt::Debug,
