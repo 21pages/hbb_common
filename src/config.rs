@@ -543,6 +543,7 @@ impl Config {
         suffix: &str,
     ) -> T {
         let file = Self::file_(suffix);
+        log::info!("load_path: {:?}", file);
         let cfg = load_path(file);
         if suffix.is_empty() {
             log::trace!("{:?}", cfg);
@@ -1849,6 +1850,7 @@ impl LocalConfig {
     }
 
     pub fn set_option(k: String, v: String) {
+        log::error!("set_option: {}, {}", k, v);
         if !is_option_can_save(
             &OVERWRITE_LOCAL_SETTINGS,
             &STRATEGY_OVERRIDE_SETTINGS,
@@ -1856,6 +1858,7 @@ impl LocalConfig {
             &DEFAULT_LOCAL_SETTINGS,
             &v,
         ) {
+            log::error!("Failed to set option: {}", k);
             return;
         }
         let mut config = LOCAL_CONFIG.write().unwrap();
@@ -1867,6 +1870,7 @@ impl LocalConfig {
             return;
         }
         let v2 = if v.is_empty() { None } else { Some(&v) };
+        log::error!("v2: {:?}", v2);
         if v2 != config.options.get(&k) {
             if v2.is_none() {
                 config.options.remove(&k);
@@ -1874,6 +1878,8 @@ impl LocalConfig {
                 config.options.insert(k, v);
             }
             config.store();
+        } else {
+            log::error!("====================== v2 is the same as config.options.get(&k)");
         }
     }
 
