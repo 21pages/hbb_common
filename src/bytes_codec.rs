@@ -105,6 +105,10 @@ impl Decoder for BytesCodec {
             None => Ok(None),
         }
     }
+
+    fn decode_eof(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        self.decode(buf)
+    }
 }
 
 impl Encoder<Bytes> for BytesCodec {
@@ -275,6 +279,160 @@ mod tests {
             assert_eq!(res[0], 6);
         } else {
             panic!();
+        }
+    }
+
+    #[test]
+    fn test_codec7() {
+        use bytes::BytesMut;
+        use std::io;
+
+        // Wrapper: forwards decode only; no decode_eof -> triggers trait default decode_eof (errors when bytes remain)
+        struct DefaultEof<'a>(&'a mut BytesCodec);
+        impl<'a> tokio_util::codec::Decoder for DefaultEof<'a> {
+            type Item = BytesMut;
+            type Error = io::Error;
+            fn decode(&mut self, src: &mut BytesMut) -> Result<Option<BytesMut>, io::Error> {
+                self.0.decode(src)
+            }
+        }
+
+        // A) Incomplete header: default decode_eof reproduces "bytes remaining on stream"
+        let len = 0x40usize; // needs 2-byte header
+        let h = ((len as u16) << 2) | 0x1;
+        let mut codec_def = BytesCodec::new();
+        let mut wrapper = DefaultEof(&mut codec_def);
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(&[(h & 0xFF) as u8]); // only low byte -> header incomplete
+        let err = tokio_util::codec::Decoder::decode_eof(&mut wrapper, &mut buf).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+
+        // Our decode_eof: no error, returns None (does not clear buf)
+        let mut codec_ok = BytesCodec::new();
+        let mut buf2 = BytesMut::new();
+        buf2.extend_from_slice(&[(h & 0xFF) as u8]);
+        let res = tokio_util::codec::Decoder::decode_eof(&mut codec_ok, &mut buf2).unwrap();
+        assert!(res.is_none());
+        assert!(!buf2.is_empty());
+
+        // B) Incomplete body: default decode_eof still errors
+        let len2 = 2usize;
+        let h2 = ((len2 as u16) << 2) | 0x1;
+        let mut codec_def2 = BytesCodec::new();
+        let mut wrapper2 = DefaultEof(&mut codec_def2);
+        let mut buf3 = BytesMut::new();
+        buf3.extend_from_slice(&[(h2 & 0xFF) as u8, (h2 >> 8) as u8]); // header complete
+        buf3.extend_from_slice(&[0xAA]); // only 1 data byte, missing 1
+        let err2 = tokio_util::codec::Decoder::decode_eof(&mut wrapper2, &mut buf3).unwrap_err();
+        assert_eq!(err2.kind(), io::ErrorKind::Other);
+
+        // New decode_eof: no error, returns None (does not clear buf)
+        let mut codec_ok2 = BytesCodec::new();
+        let mut buf4 = BytesMut::new();
+        buf4.extend_from_slice(&[(h2 & 0xFF) as u8, (h2 >> 8) as u8]);
+        buf4.extend_from_slice(&[0xAA]);
+        let res2 = tokio_util::codec::Decoder::decode_eof(&mut codec_ok2, &mut buf4).unwrap();
+        assert!(res2.is_none());
+        assert!(!buf4.is_empty());
+
+        // C) At EOF with a complete frame, still decodes correctly
+        let mut encoded = BytesMut::new();
+        encoded.extend_from_slice(&[((3usize << 2) as u8)]);
+        encoded.extend_from_slice(b"abc");
+        let mut codec_ok3 = BytesCodec::new();
+        let mut buf5 = encoded.clone();
+        if let Some(frame) =
+            tokio_util::codec::Decoder::decode_eof(&mut codec_ok3, &mut buf5).unwrap()
+        {
+            assert_eq!(frame, BytesMut::from(&b"abc"[..]));
+        } else {
+            panic!();
+        }
+    }
+
+    #[test]
+    fn test_codec8() {
+        use bytes::BytesMut;
+
+        // Prepare two encoded frames: "hello" and "world!"
+        let mut encoder = BytesCodec::new();
+        let mut f1 = BytesMut::new();
+        let mut f2 = BytesMut::new();
+        assert!(encoder.encode("hello".into(), &mut f1).is_ok());
+        assert!(encoder.encode("world!".into(), &mut f2).is_ok());
+
+        // Case 1: append half of frame1, then append the remaining half -> decode frame1
+        {
+            let mut codec = BytesCodec::new();
+            let mut buf = BytesMut::new();
+            let mid = f1.len() / 2;
+            buf.extend_from_slice(&f1[..mid]);
+            // Not enough for a frame yet
+            assert!(matches!(codec.decode(&mut buf).unwrap(), None));
+            // Append the rest of frame1
+            buf.extend_from_slice(&f1[mid..]);
+            // Now we should get frame1
+            if let Some(frame) = codec.decode(&mut buf).unwrap() {
+                assert_eq!(frame, BytesMut::from(&b"hello"[..]));
+            } else {
+                panic!();
+            }
+            // No more frames
+            assert!(codec.decode(&mut buf).unwrap().is_none());
+        }
+
+        // Case 2: append half of frame1, then append remaining of frame1 plus entire frame2
+        // Expect to decode frame1 first, then frame2 on next decode call
+        {
+            let mut codec = BytesCodec::new();
+            let mut buf = BytesMut::new();
+            let mid = f1.len() / 2;
+            buf.extend_from_slice(&f1[..mid]);
+            assert!(codec.decode(&mut buf).unwrap().is_none());
+            // Append rest of frame1 and all of frame2
+            buf.extend_from_slice(&f1[mid..]);
+            buf.extend_from_slice(&f2);
+            // First decode returns frame1
+            if let Some(frame1) = codec.decode(&mut buf).unwrap() {
+                assert_eq!(frame1, BytesMut::from(&b"hello"[..]));
+            } else {
+                panic!();
+            }
+            // Second decode returns frame2
+            if let Some(frame2) = codec.decode(&mut buf).unwrap() {
+                assert_eq!(frame2, BytesMut::from(&b"world!"[..]));
+            } else {
+                panic!();
+            }
+            // No more frames
+            assert!(codec.decode(&mut buf).unwrap().is_none());
+        }
+
+        // Case 3: append frame1 completely and half of frame2, then append the remaining of frame2
+        // Expect to decode frame1 immediately, then frame2 after remaining bytes arrive
+        {
+            let mut codec = BytesCodec::new();
+            let mut buf = BytesMut::new();
+            let mid2 = f2.len() / 2;
+            buf.extend_from_slice(&f1);
+            buf.extend_from_slice(&f2[..mid2]);
+            // First decode returns frame1
+            if let Some(frame1) = codec.decode(&mut buf).unwrap() {
+                assert_eq!(frame1, BytesMut::from(&b"hello"[..]));
+            } else {
+                panic!();
+            }
+            // Not enough for frame2 yet
+            assert!(codec.decode(&mut buf).unwrap().is_none());
+            // Append the rest of frame2
+            buf.extend_from_slice(&f2[mid2..]);
+            // Now we should get frame2
+            if let Some(frame2) = codec.decode(&mut buf).unwrap() {
+                assert_eq!(frame2, BytesMut::from(&b"world!"[..]));
+            } else {
+                panic!();
+            }
+            assert!(codec.decode(&mut buf).unwrap().is_none());
         }
     }
 }
