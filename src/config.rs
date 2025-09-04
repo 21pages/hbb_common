@@ -552,7 +552,9 @@ impl Config {
     fn load() -> Config {
         let mut config = Config::load_::<Config>("");
         let mut store = false;
+        log::info!("====DEBUG====: password load encrypt: {}", config.password);
         let (password, _, store1) = decrypt_str_or_original(&config.password, PASSWORD_ENC_VERSION);
+        log::info!("====DEBUG====: password load decrypt: {}", password);
         config.password = password;
         store |= store1;
         let mut id_valid = false;
@@ -1067,11 +1069,17 @@ impl Config {
 
     pub fn get_permanent_password() -> String {
         let mut password = CONFIG.read().unwrap().password.clone();
+        log::info!("====DEBUG====: CONFIG password: {}", password);
         if password.is_empty() {
             if let Some(v) = HARD_SETTINGS.read().unwrap().get("password") {
+                log::info!("====DEBUG====: custom client HARD_SETTINGS password: {}", v);
                 password = v.to_owned();
             }
         }
+        log::info!(
+            "====DEBUG====: get_permanent_password password: {}",
+            password
+        );
         password
     }
 

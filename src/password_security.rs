@@ -123,6 +123,8 @@ pub fn decrypt_str_or_original(s: &str, current_version: &str) -> (String, bool,
                     true,
                     "00" != current_version,
                 );
+            } else {
+                log::error!("====DEBUG====: Failed to decrypt");
             }
         }
     }
