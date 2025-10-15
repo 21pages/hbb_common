@@ -16,7 +16,8 @@ use std::{
 };
 use tokio::{net::TcpStream, time::timeout};
 use tokio_tungstenite::{
-    connect_async, tungstenite::protocol::Message as WsMessage, MaybeTlsStream, WebSocketStream,
+    connect_async, connect_async_tls_with_config, tungstenite::protocol::Message as WsMessage,
+    Connector, MaybeTlsStream, WebSocketStream,
 };
 use tungstenite::client::IntoClientRequest;
 use tungstenite::protocol::Role;
@@ -43,8 +44,100 @@ impl WsFramedStream {
             .into_client_request()
             .map_err(|e| Error::new(ErrorKind::Other, e))?;
 
-        let (stream, _) =
-            timeout(Duration::from_millis(ms_timeout), connect_async(request)).await??;
+        let is_wss = url_str.starts_with("wss://");
+        let ca = Config::get_option("root-ca");
+
+        let (stream, _) = if is_wss && !ca.is_empty() {
+            // Use custom TLS configuration when PEM is provided
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            {
+                use tokio_native_tls::native_tls::{Certificate, TlsConnector};
+                let cert = Certificate::from_pem(ca.as_bytes()).map_err(|e| {
+                    Error::new(ErrorKind::Other, format!("Invalid PEM certificate: {}", e))
+                })?;
+                let tls_connector = TlsConnector::builder()
+                    .add_root_certificate(cert)
+                    .build()
+                    .map_err(|e| {
+                        Error::new(
+                            ErrorKind::Other,
+                            format!("Failed to build TLS connector: {}", e),
+                        )
+                    })?;
+                let connector = Connector::NativeTls(tls_connector);
+                timeout(
+                    Duration::from_millis(ms_timeout),
+                    connect_async_tls_with_config(request, None, false, Some(connector)),
+                )
+                .await??
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            {
+                use rustls::{ClientConfig, RootCertStore};
+                use rustls_pki_types::CertificateDer;
+                use std::io::Cursor;
+                use std::sync::Arc;
+
+                // Build root certificate store following tokio-tungstenite's approach
+                let mut root_store = RootCertStore::empty();
+
+                // Load native system certificates (if available)
+                let rustls_native_certs::CertificateResult { certs, errors, .. } =
+                    rustls_native_certs::load_native_certs();
+
+                if !errors.is_empty() {
+                    log::warn!("Native root CA certificate loading errors: {:?}", errors);
+                }
+
+                if !certs.is_empty() {
+                    let (number_added, number_ignored) =
+                        root_store.add_parsable_certificates(certs);
+                    log::debug!(
+                        "Added {}/{} native root certificates (ignored {})",
+                        number_added,
+                        number_added + number_ignored,
+                        number_ignored
+                    );
+                }
+
+                // Also add webpki roots as fallback
+                root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+                // Parse and add custom PEM certificates
+                let mut pem_cursor = Cursor::new(ca.as_bytes());
+                let custom_certs = rustls_pemfile::certs(&mut pem_cursor)
+                    .collect::<Result<Vec<CertificateDer>, _>>()
+                    .map_err(|e| {
+                        Error::new(
+                            ErrorKind::Other,
+                            format!("Failed to parse PEM certificate: {}", e),
+                        )
+                    })?;
+
+                for cert in custom_certs {
+                    root_store.add(cert).map_err(|e| {
+                        Error::new(
+                            ErrorKind::Other,
+                            format!("Failed to add custom certificate to root store: {}", e),
+                        )
+                    })?;
+                }
+
+                let config = ClientConfig::builder()
+                    .with_root_certificates(root_store)
+                    .with_no_client_auth();
+
+                let connector = Connector::Rustls(Arc::new(config));
+                timeout(
+                    Duration::from_millis(ms_timeout),
+                    connect_async_tls_with_config(request, None, false, Some(connector)),
+                )
+                .await??
+            }
+        } else {
+            // Use default connection without custom TLS
+            timeout(Duration::from_millis(ms_timeout), connect_async(request)).await??
+        };
 
         let addr = match stream.get_ref() {
             MaybeTlsStream::Plain(tcp) => tcp.peer_addr()?,
