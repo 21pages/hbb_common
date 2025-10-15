@@ -59,15 +59,15 @@ tokio-rustls = { version = "0.26", features = [
     "tls12",
     "ring",
 ], default-features = false }
-rustls-platform-verifier = "0.5"
-rustls-pki-types = "1.11"
-tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots", "rustls-tls-webpki-roots"] }
-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots", "rustls-tls-webpki-roots"] }
+rustls-platform-verifier = "0.6"
+rustls-pki-types = "1.12"
+tokio-tungstenite = { git = "https://github.com/21pages/tokio-tungstenite", branch = "v0.28.0", features = ["rustls-tls-native-roots", "rustls-tls-webpki-roots"] }
+tungstenite = { git = "https://github.com/21pages/tungstenite-rs", branch = "v0.28.0", features = ["rustls-tls-native-roots", "rustls-tls-webpki-roots"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 tokio-native-tls = "0.3"
-tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
-tungstenite = { version = "0.26", features = ["native-tls"] }
+tokio-tungstenite = { git = "https://github.com/21pages/tokio-tungstenite", branch = "v0.28.0", features = ["native-tls"] }
+tungstenite = { git = "https://github.com/21pages/tungstenite-rs", branch = "v0.28.0", features = ["native-tls"] }
 
 [build-dependencies]
 protobuf-codegen = { version = "3.7" }

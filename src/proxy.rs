@@ -11,7 +11,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufStream};
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 use tokio_native_tls::{native_tls, TlsConnector, TlsStream};
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-use tokio_rustls::{client::TlsStream, TlsConnector};
+use tokio_rustls::{client::TlsStream, rustls, TlsConnector};
 use tokio_socks::{tcp::Socks5Stream, IntoTargetAddr};
 use tokio_util::codec::Framed;
 use url::Url;
@@ -56,7 +56,6 @@ const MAXIMUM_RESPONSE_HEADERS: usize = 16;
 const DEFINE_TIME_OUT: u64 = 600;
 
 pub trait IntoUrl {
-
     // Besides parsing as a valid `Url`, the `Url` must be a valid
     // `http::Uri`, in that it makes sense to use in a network request.
     fn into_url(self) -> Result<Url, ProxyError>;
@@ -455,8 +454,15 @@ impl Proxy {
         Input: AsyncRead + AsyncWrite + Unpin,
         T: IntoTargetAddr<'a>,
     {
+        use rustls_platform_verifier::ConfigVerifierExt;
         use std::convert::TryFrom;
-        let verifier = rustls_platform_verifier::tls_config();
+
+        let verifier = rustls::ClientConfig::with_platform_verifier().map_err(|e| {
+            ProxyError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ))
+        })?;
         let url_domain = self.intercept.get_domain()?;
 
         let domain = rustls_pki_types::ServerName::try_from(url_domain.as_str())
