@@ -780,10 +780,12 @@ impl Config {
     }
 
     pub fn reset_online() {
+        log::info!("reset online");
         *ONLINE.lock().unwrap() = Default::default();
     }
 
     pub fn update_latency(host: &str, latency: i64) {
+        log::info!("update latency: {} -> {}", host, latency);
         ONLINE.lock().unwrap().insert(host.to_owned(), latency);
         let mut host = "".to_owned();
         let mut delay = i64::MAX;
