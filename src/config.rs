@@ -2491,6 +2491,7 @@ pub mod keys {
     pub const OPTION_AV1_TEST: &str = "av1-test";
     pub const OPTION_TRACKPAD_SPEED: &str = "trackpad-speed";
     pub const OPTION_REGISTER_DEVICE: &str = "register-device";
+    pub const OPTION_ENABLE_RETINA: &str = "enable-retina";
 
     // built-in options
     pub const OPTION_DISPLAY_NAME: &str = "display-name";
@@ -2667,6 +2668,7 @@ pub mod keys {
         OPTION_ENABLE_DIRECTX_CAPTURE,
         OPTION_ENABLE_ANDROID_SOFTWARE_ENCODING_HALF_SCALE,
         OPTION_ENABLE_TRUSTED_DEVICES,
+        OPTION_ENABLE_RETINA,
     ];
 
     // BUILDIN_SETTINGS
