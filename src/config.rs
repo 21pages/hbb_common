@@ -7,6 +7,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Mutex, RwLock},
     time::{Duration, Instant, SystemTime},
+    convert::TryFrom,
 };
 
 use anyhow::Result;
@@ -114,9 +115,9 @@ pub const WS_RENDEZVOUS_PORT: i32 = 21118;
 pub const WS_RELAY_PORT: i32 = 21119;
 
 macro_rules! serde_field_string {
-    ($default_func:ident, $de_func:ident, $default_expr:expr) => {
+    ($default_func:ident, $de_func:ident, $key:expr) => {
         fn $default_func() -> String {
-            $default_expr
+            UserDefaultConfig::read($key)
         }
 
         fn $de_func<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -131,6 +132,46 @@ macro_rules! serde_field_string {
             Ok(s)
         }
     };
+}
+
+macro_rules! serde_field_i32 {
+    ($default_func:ident, $de_func:ident, $key:expr) => {
+        fn $default_func() -> i32 {
+            let range = UserDefaultConfig::get_num_range($key);
+
+            let raw_value: i32 = UserDefaultConfig::read_i32($key);
+
+            range.in_range_or_default(raw_value as f64) as i32
+        }
+
+        fn $de_func<'de, D>(deserializer: D) -> Result<i32, D::Error>
+        where
+            D: de::Deserializer<'de>,
+        {
+            let range = UserDefaultConfig::get_num_range($key);
+
+            let default: i32 = Self::$default_func();
+
+            let value: i32 =
+                de::Deserialize::deserialize(deserializer).unwrap_or(default);
+
+            if range.is_in_range(value as f64) {
+                Ok(value)
+            } else {
+                Ok(default)
+            }
+        }
+    };
+
+    ($default_func: ident, $key: expr) => {
+        fn $default_func() -> i32 {
+            let range = UserDefaultConfig::get_num_range($key);
+
+            let raw_value: i32 = UserDefaultConfig::read_i32($key);
+
+            range.in_range_or_default(raw_value as f64) as i32
+        }
+    }
 }
 
 macro_rules! serde_field_bool {
@@ -247,13 +288,18 @@ pub struct PeerConfig {
         skip_serializing_if = "String::is_empty"
     )]
     pub view_style: String,
-    // Image scroll style, scrollbar or scroll auto
+    // Image scroll style, scrolledge, scrollbar or scroll auto
     #[serde(
         default = "PeerConfig::default_scroll_style",
         deserialize_with = "PeerConfig::deserialize_scroll_style",
         skip_serializing_if = "String::is_empty"
     )]
     pub scroll_style: String,
+    #[serde(
+        default = "PeerConfig::default_edge_scroll_edge_thickness",
+        deserialize_with = "PeerConfig::deserialize_edge_scroll_edge_thickness",
+    )]
+    pub edge_scroll_edge_thickness: i32,
     #[serde(
         default = "PeerConfig::default_image_quality",
         deserialize_with = "PeerConfig::deserialize_image_quality",
@@ -262,10 +308,9 @@ pub struct PeerConfig {
     pub image_quality: String,
     #[serde(
         default = "PeerConfig::default_custom_image_quality",
-        deserialize_with = "PeerConfig::deserialize_custom_image_quality",
-        skip_serializing_if = "Vec::is_empty"
+        deserialize_with = "PeerConfig::deserialize_custom_image_quality_backward_compatible",
     )]
-    pub custom_image_quality: Vec<i32>,
+    pub custom_image_quality: i32,
     #[serde(flatten)]
     pub show_remote_cursor: ShowRemoteCursor,
     #[serde(flatten)]
@@ -362,6 +407,7 @@ impl Default for PeerConfig {
             size_pf: Default::default(),
             view_style: Self::default_view_style(),
             scroll_style: Self::default_scroll_style(),
+            edge_scroll_edge_thickness: Self::default_edge_scroll_edge_thickness(),
             image_quality: Self::default_image_quality(),
             custom_image_quality: Self::default_custom_image_quality(),
             show_remote_cursor: Default::default(),
@@ -393,6 +439,15 @@ impl Default for PeerConfig {
             sync_init_clipboard: Default::default(),
         }
     }
+}
+
+// For backwards compatibility, allow legacy Vec<i32> data to be
+// deserialized for Custom Image Quality.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum CustomImageQualityValue {
+    I32(i32),
+    Vec(Vec<i32>),
 }
 
 #[derive(Debug, PartialEq, Default, Serialize, Deserialize, Clone)]
@@ -1533,50 +1588,65 @@ impl PeerConfig {
     serde_field_string!(
         default_view_style,
         deserialize_view_style,
-        UserDefaultConfig::read(keys::OPTION_VIEW_STYLE)
+        keys::OPTION_VIEW_STYLE
     );
     serde_field_string!(
         default_scroll_style,
         deserialize_scroll_style,
-        UserDefaultConfig::read(keys::OPTION_SCROLL_STYLE)
+        keys::OPTION_SCROLL_STYLE
     );
+
+    serde_field_i32!(
+        default_edge_scroll_edge_thickness,
+        deserialize_edge_scroll_edge_thickness,
+        keys::OPTION_EDGE_SCROLL_EDGE_THICKNESS
+    );
+
     serde_field_string!(
         default_image_quality,
         deserialize_image_quality,
-        UserDefaultConfig::read(keys::OPTION_IMAGE_QUALITY)
+        keys::OPTION_IMAGE_QUALITY
     );
     serde_field_string!(
         default_reverse_mouse_wheel,
         deserialize_reverse_mouse_wheel,
-        UserDefaultConfig::read(keys::OPTION_REVERSE_MOUSE_WHEEL)
+        keys::OPTION_REVERSE_MOUSE_WHEEL
     );
     serde_field_string!(
         default_displays_as_individual_windows,
         deserialize_displays_as_individual_windows,
-        UserDefaultConfig::read(keys::OPTION_DISPLAYS_AS_INDIVIDUAL_WINDOWS)
+        keys::OPTION_DISPLAYS_AS_INDIVIDUAL_WINDOWS
     );
     serde_field_string!(
         default_use_all_my_displays_for_the_remote_session,
         deserialize_use_all_my_displays_for_the_remote_session,
-        UserDefaultConfig::read(keys::OPTION_USE_ALL_MY_DISPLAYS_FOR_THE_REMOTE_SESSION)
+        keys::OPTION_USE_ALL_MY_DISPLAYS_FOR_THE_REMOTE_SESSION
     );
 
-    fn default_custom_image_quality() -> Vec<i32> {
-        let f: f64 = UserDefaultConfig::read(keys::OPTION_CUSTOM_IMAGE_QUALITY)
-            .parse()
-            .unwrap_or(50.0);
-        vec![f as _]
-    }
+    serde_field_i32!(
+        default_custom_image_quality,
+        keys::OPTION_CUSTOM_IMAGE_QUALITY
+    );
 
-    fn deserialize_custom_image_quality<'de, D>(deserializer: D) -> Result<Vec<i32>, D::Error>
+    fn deserialize_custom_image_quality_backward_compatible<'de, D>(deserializer: D) -> Result<i32, D::Error>
     where
         D: de::Deserializer<'de>,
     {
-        let v: Vec<i32> = de::Deserialize::deserialize(deserializer)?;
-        if v.len() == 1 && v[0] >= 10 && v[0] <= 0xFFF {
-            Ok(v)
-        } else {
-            Ok(Self::default_custom_image_quality())
+        let range = UserDefaultConfig::get_num_range(keys::OPTION_CUSTOM_IMAGE_QUALITY);
+        let v: CustomImageQualityValue = de::Deserialize::deserialize(deserializer)?;
+
+        match v {
+            CustomImageQualityValue::I32(i) => {
+                Ok(range.in_range_or_default(i as f64) as i32)
+            }
+
+            CustomImageQualityValue::Vec(v) => {
+                if v.len() == 1 {
+                    Ok(range.in_range_or_default(v[0] as f64) as i32)
+                } else {
+                    Ok(range.default as i32)
+                }
+            }
         }
     }
 
@@ -1597,23 +1667,10 @@ impl PeerConfig {
         mp
     }
 
-    fn default_trackpad_speed() -> i32 {
-        UserDefaultConfig::read(keys::OPTION_TRACKPAD_SPEED)
-            .parse()
-            .unwrap_or(100)
-    }
-
-    fn deserialize_trackpad_speed<'de, D>(deserializer: D) -> Result<i32, D::Error>
-    where
-        D: de::Deserializer<'de>,
-    {
-        let v: i32 = de::Deserialize::deserialize(deserializer)?;
-        if v >= 10 && v <= 1000 {
-            Ok(v)
-        } else {
-            Ok(Self::default_trackpad_speed())
-        }
-    }
+    serde_field_i32!(
+        default_trackpad_speed,
+        deserialize_trackpad_speed,
+        keys::OPTION_TRACKPAD_SPEED);
 }
 
 serde_field_bool!(
@@ -1916,6 +1973,42 @@ impl LanPeers {
     }
 }
 
+#[derive(Default, Copy, Clone, Serialize, Deserialize)]
+pub struct NumRange {
+    pub default: f64,
+    pub minimum: f64,
+    pub maximum: f64,
+}
+
+impl NumRange {
+    pub fn new<T>(default: T, minimum: T, maximum: T) -> Self
+    where f64: From<T>
+    {
+        NumRange {
+            default: f64::from(default),
+            minimum: f64::from(minimum),
+            maximum: f64::from(maximum),
+        }
+    }
+
+    pub fn is_in_range<T>(&self, value: T) -> bool
+    where T: TryFrom<f64> + Default + Copy, f64: From<T>
+    {
+        let value_f64 = f64::from(value);
+        value_f64 >= self.minimum && value_f64 <= self.maximum
+    }
+
+    pub fn in_range_or_default<T>(&self, value: T) -> T
+    where T: TryFrom<f64> + Default + Copy, f64: From<T>
+    {
+        if self.is_in_range(value) {
+            value
+        } else {
+            T::try_from(self.default).unwrap_or_default()
+        }
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct UserDefaultConfig {
     #[serde(default, deserialize_with = "deserialize_hashmap_string_string")]
@@ -1933,6 +2026,10 @@ impl UserDefaultConfig {
         cfg.0.get(key)
     }
 
+    fn read_i32(key: &str) -> i32 {
+        Self::read(key).parse().unwrap_or(0)
+    }
+
     pub fn load() -> UserDefaultConfig {
         Config::load_::<UserDefaultConfig>("_default")
     }
@@ -1942,28 +2039,27 @@ impl UserDefaultConfig {
         Config::store_(self, "_default");
     }
 
-    pub fn get(&self, key: &str) -> String {
+    pub fn get_num_range(key: &str) -> NumRange {
         match key {
-            #[cfg(any(target_os = "android", target_os = "ios"))]
-            keys::OPTION_VIEW_STYLE => self.get_string(key, "adaptive", vec!["original"]),
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            keys::OPTION_VIEW_STYLE => self.get_string(key, "original", vec!["adaptive"]),
-            keys::OPTION_SCROLL_STYLE => self.get_string(key, "scrollauto", vec!["scrolledge", "scrollbar"]),
-            keys::OPTION_IMAGE_QUALITY => {
-                self.get_string(key, "balanced", vec!["best", "low", "custom"])
-            }
-            keys::OPTION_CODEC_PREFERENCE => {
-                self.get_string(key, "auto", vec!["vp8", "vp9", "av1", "h264", "h265"])
-            }
-            keys::OPTION_CUSTOM_IMAGE_QUALITY => self.get_num_string(key, 50.0, 10.0, 0xFFF as f64),
-            keys::OPTION_CUSTOM_FPS => self.get_num_string(key, 30.0, 5.0, 120.0),
-            keys::OPTION_ENABLE_FILE_COPY_PASTE => self.get_string(key, "Y", vec!["", "N"]),
-            keys::OPTION_TRACKPAD_SPEED => self.get_num_string(key, 100, 10, 1000),
-            _ => self
-                .get_after(key)
-                .map(|v| v.to_string())
-                .unwrap_or_default(),
+            keys::OPTION_EDGE_SCROLL_EDGE_THICKNESS => NumRange::new(100.0, 10.0, 150.0),
+            keys::OPTION_CUSTOM_IMAGE_QUALITY => NumRange::new(50.0, 10.0, 0xFFF as f64),
+            keys::OPTION_CUSTOM_FPS => NumRange::new(30.0, 5.0, 120.0),
+            keys::OPTION_TRACKPAD_SPEED => NumRange::new(100, 10, 1000),
+            _ => NumRange::default()
         }
+    }
+
+    pub fn get(&self, key: &str) -> String {
+        let string_value = self.get_string(key);
+        if !string_value.is_empty() { return string_value; }
+
+        let i32_value = self.try_get_i32(key);
+        if i32_value.is_some() { return i32_value.unwrap().to_string(); }
+
+        let f64_value = self.try_get_f64(key);
+        if f64_value.is_some() { return f64_value.unwrap().to_string(); }
+
+        return "".to_string();
     }
 
     pub fn set(&mut self, key: String, value: String) {
@@ -1987,7 +2083,65 @@ impl UserDefaultConfig {
     }
 
     #[inline]
-    fn get_string(&self, key: &str, default: &str, others: Vec<&str>) -> String {
+    pub fn get_string(&self, key: &str) -> String {
+        match key {
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            keys::OPTION_VIEW_STYLE => self.get_string_in_range(key, "adaptive", vec!["original"]),
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            keys::OPTION_VIEW_STYLE => self.get_string_in_range(key, "original", vec!["adaptive"]),
+            keys::OPTION_SCROLL_STYLE => self.get_string_in_range(key, "scrollauto", vec!["scrolledge", "scrollbar"]),
+            keys::OPTION_IMAGE_QUALITY => {
+                self.get_string_in_range(key, "balanced", vec!["best", "low", "custom"])
+            }
+            keys::OPTION_CODEC_PREFERENCE => {
+                self.get_string_in_range(key, "auto", vec!["vp8", "vp9", "av1", "h264", "h265"])
+            }
+            keys::OPTION_ENABLE_FILE_COPY_PASTE => self.get_string_in_range(key, "Y", vec!["", "N"]),
+            _ => self
+                .get_after(key)
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+        }
+    }
+
+    // returns None if key is not an i32 option
+    #[inline]
+    pub fn try_get_i32(&self, key: &str) -> Option<i32> {
+        let range = Self::get_num_range(key);
+
+        match key {
+            keys::OPTION_TRACKPAD_SPEED => Some(self.get_i32_in_range(key, range)),
+            keys::OPTION_EDGE_SCROLL_EDGE_THICKNESS => Some(self.get_i32_in_range(key, range)),
+            _ => None
+        }
+    }
+
+    // returns 0 if key is not an i32 option
+    #[inline]
+    pub fn get_i32(&self, key: &str) -> i32 {
+        self.try_get_i32(key).unwrap_or(0)
+    }
+
+    // returns None if key is not an f64 options
+    #[inline]
+    pub fn try_get_f64(&self, key: &str) -> Option<f64> {
+        let range = Self::get_num_range(key);
+
+        match key {
+            keys::OPTION_CUSTOM_IMAGE_QUALITY => Some(self.get_f64_in_range(key, range)),
+            keys::OPTION_CUSTOM_FPS => Some(self.get_f64_in_range(key, range)),
+            _ => None
+        }
+    }
+
+    // returns 0.0 if key is not an f64 options
+    #[inline]
+    pub fn get_f64(&self, key: &str) -> f64 {
+        self.try_get_f64(key).unwrap_or(0.0)
+    }
+
+    #[inline]
+    fn get_string_in_range(&self, key: &str, default: &str, others: Vec<&str>) -> String {
         match self.get_after(key) {
             Some(option) => {
                 if others.contains(&option.as_str()) {
@@ -2001,20 +2155,26 @@ impl UserDefaultConfig {
     }
 
     #[inline]
-    fn get_num_string<T>(&self, key: &str, default: T, min: T, max: T) -> String
-    where
-        T: ToString + std::str::FromStr + std::cmp::PartialOrd + std::marker::Copy,
+    fn get_i32_in_range(&self, key: &str, range: NumRange) -> i32
     {
         match self.get_after(key) {
             Some(option) => {
-                let v: T = option.parse().unwrap_or(default);
-                if v >= min && v <= max {
-                    v.to_string()
-                } else {
-                    default.to_string()
-                }
+                let v: i32 = option.parse().unwrap_or(range.default as i32);
+                range.in_range_or_default(v as f64) as i32
             }
-            None => default.to_string(),
+            None => range.default as i32,
+        }
+    }
+
+    #[inline]
+    fn get_f64_in_range(&self, key: &str, range: NumRange) -> f64
+    {
+        match self.get_after(key) {
+            Some(option) => {
+                let v: f64 = option.parse().unwrap_or(range.default);
+                range.in_range_or_default(v)
+            }
+            None => range.default,
         }
     }
 
@@ -2447,6 +2607,7 @@ pub mod keys {
         "use_all_my_displays_for_the_remote_session";
     pub const OPTION_VIEW_STYLE: &str = "view_style";
     pub const OPTION_SCROLL_STYLE: &str = "scroll_style";
+    pub const OPTION_EDGE_SCROLL_EDGE_THICKNESS: &str = "edge-scroll-edge-thickness";
     pub const OPTION_IMAGE_QUALITY: &str = "image_quality";
     pub const OPTION_CUSTOM_IMAGE_QUALITY: &str = "custom_image_quality";
     pub const OPTION_CUSTOM_FPS: &str = "custom-fps";
@@ -2614,6 +2775,7 @@ pub mod keys {
         OPTION_VIEW_STYLE,
         OPTION_TERMINAL_PERSISTENT,
         OPTION_SCROLL_STYLE,
+        OPTION_EDGE_SCROLL_EDGE_THICKNESS,
         OPTION_IMAGE_QUALITY,
         OPTION_CUSTOM_IMAGE_QUALITY,
         OPTION_CUSTOM_FPS,
