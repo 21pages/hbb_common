@@ -70,6 +70,8 @@ lazy_static::lazy_static! {
     pub static ref OVERWRITE_LOCAL_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
     pub static ref HARD_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
     pub static ref BUILTIN_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+    pub static ref PRESET_PASSWORD_SALT: RwLock<String> = Default::default();
+    pub static ref PRESET_HASHED_PASSWORD: RwLock<Vec<u8>> = Default::default();
 }
 
 #[cfg(target_os = "android")]
@@ -1091,6 +1093,19 @@ impl Config {
             }
         }
         password
+    }
+
+    pub fn get_preset_password_salt() -> String {
+        PRESET_PASSWORD_SALT.read().unwrap().clone()
+    }
+
+    pub fn get_preset_hashed_password() -> Vec<u8> {
+        PRESET_HASHED_PASSWORD.read().unwrap().clone()
+    }
+
+    pub fn has_preset_hashed_password() -> bool {
+        !Self::get_preset_hashed_password().is_empty()
+            && !Self::get_preset_password_salt().is_empty()
     }
 
     pub fn set_salt(salt: &str) {
