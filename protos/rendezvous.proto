@@ -210,6 +210,20 @@ message HealthCheck {
   string token = 1;
 }
 
+message HttpProxyRequest {
+  string method = 1;
+  string path = 2;
+  map<string, string> headers = 3;
+  bytes body = 4;
+}
+
+message HttpProxyResponse {
+  int32 status = 1;
+  map<string, string> headers = 2;
+  bytes body = 3;
+  string error = 4;
+}
+
 message RendezvousMessage {
   oneof union {
     RegisterPeer register_peer = 6;
@@ -233,5 +247,7 @@ message RendezvousMessage {
     OnlineResponse online_response = 24;
     KeyExchange key_exchange = 25;
     HealthCheck hc = 26;
+    HttpProxyRequest http_proxy_request = 27;
+    HttpProxyResponse http_proxy_response = 28;
   }
 }
