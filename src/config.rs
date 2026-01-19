@@ -2581,6 +2581,8 @@ pub mod keys {
     pub const OPTION_ALLOW_AUTO_RECORD_OUTGOING: &str = "allow-auto-record-outgoing";
     pub const OPTION_VIDEO_SAVE_DIRECTORY: &str = "video-save-directory";
     pub const OPTION_ENABLE_ABR: &str = "enable-abr";
+    pub const OPTION_ALLOW_REALTIME_SYNC_HOSTNAME_CHANGE: &str =
+        "allow-realtime-sync-hostname-change";
     pub const OPTION_ALLOW_REMOVE_WALLPAPER: &str = "allow-remove-wallpaper";
     pub const OPTION_ALLOW_ALWAYS_SOFTWARE_RENDER: &str = "allow-always-software-render";
     pub const OPTION_ALLOW_LINUX_HEADLESS: &str = "allow-linux-headless";
@@ -2792,6 +2794,7 @@ pub mod keys {
         OPTION_ALLOW_ONLY_CONN_WINDOW_OPEN,
         OPTION_ALLOW_AUTO_RECORD_INCOMING,
         OPTION_ENABLE_ABR,
+        OPTION_ALLOW_REALTIME_SYNC_HOSTNAME_CHANGE,
         OPTION_ALLOW_REMOVE_WALLPAPER,
         OPTION_ALLOW_ALWAYS_SOFTWARE_RENDER,
         OPTION_ALLOW_LINUX_HEADLESS,
