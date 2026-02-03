@@ -588,6 +588,7 @@ impl Config {
             store = true;
         }
         if !id_valid {
+            log::warn!("ID is invalid, generating new one");
             for _ in 0..3 {
                 if let Some(id) = Config::gen_id() {
                     config.id = id;
@@ -918,6 +919,7 @@ impl Config {
                     id = (id << 8) | (*x as u32);
                 }
                 id &= 0x1FFFFFFF;
+                log::info!("Generated id {} from mac address: {:?}", id, ma);
                 Some(id.to_string())
             } else {
                 None
@@ -994,6 +996,23 @@ impl Config {
 
     pub fn get_cached_pk() -> Option<Vec<u8>> {
         KEY_PAIR.lock().unwrap().clone().map(|k| k.1)
+    }
+
+    /// Get existing key pair without generating a new one.
+    /// Returns None if no key pair exists in cache or config file.
+    pub fn get_existing_key_pair() -> Option<KeyPair> {
+        let mut lock = KEY_PAIR.lock().unwrap();
+        if let Some(p) = lock.as_ref() {
+            return Some(p.clone());
+        }
+
+        let config = Config::load_::<Config>("");
+        if !config.key_pair.0.is_empty() {
+            *lock = Some(config.key_pair.clone());
+            Some(config.key_pair)
+        } else {
+            None
+        }
     }
 
     pub fn no_register_device() -> bool {

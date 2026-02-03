@@ -93,8 +93,16 @@ pub fn hide_cm() -> bool {
 
 const VERSION_LEN: usize = 2;
 
+// Check if data is already encrypted by verifying prefix and base64 format
+// Does not attempt symmetric decryption to avoid false negatives from key mismatch
+fn is_encrypted(v: &[u8]) -> bool {
+    v.len() > VERSION_LEN
+        && v.starts_with(b"00")
+        && base64::decode(&v[VERSION_LEN..], base64::Variant::Original).is_ok()
+}
+
 pub fn encrypt_str_or_original(s: &str, version: &str, max_len: usize) -> String {
-    if decrypt_str_or_original(s, version).1 {
+    if is_encrypted(s.as_bytes()) {
         log::error!("Duplicate encryption!");
         return s.to_owned();
     }
@@ -131,7 +139,7 @@ pub fn decrypt_str_or_original(s: &str, current_version: &str) -> (String, bool,
 }
 
 pub fn encrypt_vec_or_original(v: &[u8], version: &str, max_len: usize) -> Vec<u8> {
-    if decrypt_vec_or_original(v, version).1 {
+    if is_encrypted(v) {
         log::error!("Duplicate encryption!");
         return v.to_owned();
     }
@@ -184,7 +192,8 @@ pub fn symmetric_crypt(data: &[u8], encrypt: bool) -> Result<Vec<u8>, ()> {
     use sodiumoxide::crypto::secretbox;
     use std::convert::TryInto;
 
-    let mut keybuf = crate::get_uuid();
+    let uuid = crate::get_uuid();
+    let mut keybuf = uuid.clone();
     keybuf.resize(secretbox::KEYBYTES, 0);
     let key = secretbox::Key(keybuf.try_into().map_err(|_| ())?);
     let nonce = secretbox::Nonce([0; secretbox::NONCEBYTES]);
@@ -192,7 +201,21 @@ pub fn symmetric_crypt(data: &[u8], encrypt: bool) -> Result<Vec<u8>, ()> {
     if encrypt {
         Ok(secretbox::seal(data, &nonce, &key))
     } else {
-        secretbox::open(data, &nonce, &key)
+        let res = secretbox::open(data, &nonce, &key);
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        if res.is_err() {
+            // Fallback: try pk if uuid decryption failed (in case encryption used pk due to machine_uid failure)
+            if let Some(key_pair) = Config::get_existing_key_pair() {
+                let pk = key_pair.1;
+                if pk != uuid {
+                    let mut keybuf = pk;
+                    keybuf.resize(secretbox::KEYBYTES, 0);
+                    let pk_key = secretbox::Key(keybuf.try_into().map_err(|_| ())?);
+                    return secretbox::open(data, &nonce, &pk_key);
+                }
+            }
+        }
+        res
     }
 }
 
@@ -300,5 +323,71 @@ mod test {
         test_speed(1024 * 1024, "1M");
         test_speed(10 * 1024 * 1024, "10M");
         test_speed(100 * 1024 * 1024, "100M");
+    }
+
+    #[test]
+    fn test_is_encrypted() {
+        use super::*;
+
+        // Empty data should not be considered encrypted
+        assert!(!is_encrypted(b""));
+        assert!(!is_encrypted(b"0"));
+        assert!(!is_encrypted(b"00"));
+
+        // Data without "00" prefix should not be considered encrypted
+        assert!(!is_encrypted(b"01abcd"));
+        assert!(!is_encrypted(b"99abcd"));
+        assert!(!is_encrypted(b"hello world"));
+
+        // Data with "00" prefix but invalid base64 should not be considered encrypted
+        assert!(!is_encrypted(b"00!!!invalid base64!!!"));
+        assert!(!is_encrypted(b"00@#$%"));
+
+        // Data with "00" prefix and valid base64 should be considered encrypted
+        assert!(is_encrypted(b"00YWJjZA==")); // "abcd" in base64
+        assert!(is_encrypted(b"00SGVsbG8gV29ybGQ=")); // "Hello World" in base64
+
+        // Real encrypted data should be detected
+        let version = "00";
+        let max_len = 128;
+        let encrypted_str = encrypt_str_or_original("test password", version, max_len);
+        assert!(is_encrypted(encrypted_str.as_bytes()));
+        let encrypted_vec = encrypt_vec_or_original(b"test password", version, max_len);
+        assert!(is_encrypted(&encrypted_vec));
+
+        // Original unencrypted data should not be detected as encrypted
+        assert!(!is_encrypted(b"test password"));
+        assert!(!is_encrypted("plain text".as_bytes()));
+    }
+
+    // Test decryption fallback when data was encrypted with key_pair but decryption tries machine_uid first
+    #[test]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn test_decrypt_with_pk_fallback() {
+        use sodiumoxide::crypto::secretbox;
+        use std::convert::TryInto;
+
+        let uuid = crate::get_uuid();
+        let pk = crate::config::Config::get_key_pair().1;
+
+        // Ensure uuid != pk, otherwise fallback branch won't be tested
+        if uuid == pk {
+            eprintln!("skip: uuid == pk, fallback branch won't be tested");
+            return;
+        }
+
+        let data = b"test password 123";
+        let nonce = secretbox::Nonce([0; secretbox::NONCEBYTES]);
+
+        // Encrypt with pk (simulating machine_uid failure during encryption)
+        let mut pk_keybuf = pk;
+        pk_keybuf.resize(secretbox::KEYBYTES, 0);
+        let pk_key = secretbox::Key(pk_keybuf.try_into().unwrap());
+        let encrypted = secretbox::seal(data, &nonce, &pk_key);
+
+        // Decrypt using symmetric_crypt (should fallback to pk since uuid differs)
+        let decrypted = super::symmetric_crypt(&encrypted, false);
+        assert!(decrypted.is_ok(), "Decryption with pk fallback should succeed");
+        assert_eq!(decrypted.unwrap(), data);
     }
 }

@@ -312,10 +312,52 @@ pub fn get_exe_time() -> SystemTime {
     })
 }
 
+/// Known cases where machine_uid::get() may fail:
+/// - Windows shutdown: "The media is write protected. (os error 19)"
+/// - macOS (hard to reproduce): "No matching IOPlatformUUID in `ioreg -rd1 -c IOPlatformExpertDevice` command"
 pub fn get_uuid() -> Vec<u8> {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    if let Ok(id) = machine_uid::get() {
-        return id.into();
+    {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static CACHED_MACHINE_UID: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+        static LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+        // Only macOS needs retry logic here because:
+        // - macOS: in testing, only one failure occurred when reading at 10ms intervals, so retry helps
+        // - Windows: failures during shutdown are persistent, retrying is pointless
+        #[cfg(target_os = "macos")]
+        {
+            static INIT: std::sync::Once = std::sync::Once::new();
+            INIT.call_once(|| {
+                for _ in 0..6 {
+                    if let Ok(id) = machine_uid::get() {
+                        let _ = CACHED_MACHINE_UID.set(id.into());
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            });
+        }
+
+        if let Some(uid) = CACHED_MACHINE_UID.get() {
+            return uid.clone();
+        }
+
+        match machine_uid::get() {
+            Ok(id) => {
+                let uid: Vec<u8> = id.into();
+                let _ = CACHED_MACHINE_UID.set(uid.clone());
+                return uid;
+            }
+            Err(e) => {
+                let count = LOG_COUNT.load(Ordering::Relaxed);
+                if count < 30 {
+                    LOG_COUNT.fetch_add(1, Ordering::Relaxed);
+                    log::error!("Failed to get machine uid: {e}");
+                }
+            }
+        }
     }
     Config::get_key_pair().1
 }
