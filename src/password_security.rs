@@ -184,7 +184,8 @@ pub fn symmetric_crypt(data: &[u8], encrypt: bool) -> Result<Vec<u8>, ()> {
     use sodiumoxide::crypto::secretbox;
     use std::convert::TryInto;
 
-    let mut keybuf = crate::get_uuid();
+    let uuid = crate::get_uuid();
+    let mut keybuf = uuid.clone();
     keybuf.resize(secretbox::KEYBYTES, 0);
     let key = secretbox::Key(keybuf.try_into().map_err(|_| ())?);
     let nonce = secretbox::Nonce([0; secretbox::NONCEBYTES]);
@@ -192,7 +193,19 @@ pub fn symmetric_crypt(data: &[u8], encrypt: bool) -> Result<Vec<u8>, ()> {
     if encrypt {
         Ok(secretbox::seal(data, &nonce, &key))
     } else {
-        secretbox::open(data, &nonce, &key)
+        let res = secretbox::open(data, &nonce, &key);
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        if res.is_err() {
+            // Fallback: try pk if uuid decryption failed (in case encryption used pk due to machine_uid failure)
+            let pk = Config::get_key_pair().1;
+            if pk != uuid {
+                let mut keybuf = pk;
+                keybuf.resize(secretbox::KEYBYTES, 0);
+                let pk_key = secretbox::Key(keybuf.try_into().map_err(|_| ())?);
+                return secretbox::open(data, &nonce, &pk_key);
+            }
+        }
+        res
     }
 }
 
@@ -300,5 +313,27 @@ mod test {
         test_speed(1024 * 1024, "1M");
         test_speed(10 * 1024 * 1024, "10M");
         test_speed(100 * 1024 * 1024, "100M");
+    }
+
+    // Test decryption fallback when data was encrypted with key_pair but decryption tries machine_uid first
+    #[test]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn test_decrypt_with_pk_fallback() {
+        use sodiumoxide::crypto::secretbox;
+        use std::convert::TryInto;
+
+        let data = b"test password 123";
+        let nonce = secretbox::Nonce([0; secretbox::NONCEBYTES]);
+
+        // Encrypt with key_pair (simulating machine_uid failure during encryption)
+        let mut pk_keybuf = crate::config::Config::get_key_pair().1;
+        pk_keybuf.resize(secretbox::KEYBYTES, 0);
+        let pk_key = secretbox::Key(pk_keybuf.try_into().unwrap());
+        let encrypted = secretbox::seal(data, &nonce, &pk_key);
+
+        // Decrypt using symmetric_crypt (should fallback to key_pair if machine_uid differs)
+        let decrypted = super::symmetric_crypt(&encrypted, false);
+        assert!(decrypted.is_ok(), "Decryption with pk fallback should succeed");
+        assert_eq!(decrypted.unwrap(), data);
     }
 }

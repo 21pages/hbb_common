@@ -314,8 +314,44 @@ pub fn get_exe_time() -> SystemTime {
 
 pub fn get_uuid() -> Vec<u8> {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    if let Ok(id) = machine_uid::get() {
-        return id.into();
+    {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::OnceLock;
+
+        static CACHED_MACHINE_UID: OnceLock<Vec<u8>> = OnceLock::new();
+        // Track failed rounds to reduce retries after repeated failures
+        static FAILED_ROUNDS: AtomicUsize = AtomicUsize::new(0);
+        const MAX_FAILED_ROUNDS: usize = 9;
+
+        if let Some(uid) = CACHED_MACHINE_UID.get() {
+            return uid.clone();
+        }
+
+        // After MAX_FAILED_ROUNDS failures, only try once per call to avoid blocking
+        // Each round: 6 retries with 30ms sleep between them, max 150ms total
+        let retries_per_round = if FAILED_ROUNDS.load(Ordering::Relaxed) >= MAX_FAILED_ROUNDS {
+            1
+        } else {
+            6
+        };
+        for i in 0..retries_per_round {
+            match machine_uid::get() {
+                Ok(id) => {
+                    let uid: Vec<u8> = id.into();
+                    let _ = CACHED_MACHINE_UID.set(uid.clone());
+                    return uid;
+                }
+                Err(e) => {
+                    if i + 1 >= retries_per_round {
+                        static ONCE: std::sync::Once = std::sync::Once::new();
+                        ONCE.call_once(|| log::error!("Failed to get machine uid: {e}"));
+                    } else {
+                        std::thread::sleep(std::time::Duration::from_millis(30));
+                    }
+                }
+            }
+        }
+        FAILED_ROUNDS.fetch_add(1, Ordering::Relaxed);
     }
     Config::get_key_pair().1
 }
