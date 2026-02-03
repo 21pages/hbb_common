@@ -313,9 +313,17 @@ pub fn get_exe_time() -> SystemTime {
 }
 
 pub fn get_uuid() -> Vec<u8> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    if let Ok(id) = machine_uid::get() {
-        return id.into();
+    match machine_uid::get() {
+        Ok(id) => return id.into(),
+        Err(e) => {
+            if !LOGGED.swap(true, Ordering::Relaxed) {
+                log::error!("Failed to get machine uid: {e}");
+            }
+        }
     }
     Config::get_key_pair().1
 }
