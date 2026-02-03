@@ -313,16 +313,26 @@ pub fn get_exe_time() -> SystemTime {
 }
 
 pub fn get_uuid() -> Vec<u8> {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    static LOGGED: AtomicBool = AtomicBool::new(false);
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     match machine_uid::get() {
         Ok(id) => return id.into(),
         Err(e) => {
-            if !LOGGED.swap(true, Ordering::Relaxed) {
-                log::error!("Failed to get machine uid: {e}");
-            }
+                log::error!("============= Failed to get machine uid: {e}");
+                let log_path = if cfg!(windows) {
+                    r"D:\tmp\machine_uid.txt"
+                } else {
+                    "/tmp/machine_uid.txt"
+                };
+                let msg = format!(
+                    "[{}] Failed to get machine uid: {e}\n",
+                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+                );
+                let _ = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(log_path)
+                    .and_then(|mut f| std::io::Write::write_all(&mut f, msg.as_bytes()));
         }
     }
     Config::get_key_pair().1
