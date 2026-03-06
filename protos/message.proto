@@ -88,7 +88,8 @@ message LoginRequest {
   string my_platform = 13;
   bytes hwid = 14;
   string avatar = 17;
-  bytes easy_access_token = 18;
+  bytes easy_access_public_key = 18; // Ed25519 public key for easy access challenge-response
+  bytes easy_access_signature = 19; // Sign(user_sk, easy_access_challenge)
 }
 
 message Terminal {
@@ -330,6 +331,7 @@ message CursorPosition {
 message Hash {
   string salt = 1;
   string challenge = 2;
+  bytes easy_access_challenge = 3; // 32-byte random challenge for easy access verification
 }
 
 enum ClipboardFormat {

@@ -30,7 +30,6 @@ message PunchHoleRequest {
   bytes socket_addr_v6 = 10;
 }
 
-// Data passed from server to controlled device (via PunchHole / FetchLocalAddr / RequestRelay)
 message ControlledConfig {
   enum Permission {
     keyboard = 0;
@@ -47,7 +46,12 @@ message ControlledConfig {
     remote_modify = 11;
   }
   uint64 control_permissions = 1;
-  bytes easy_access_token = 2; // encrypted, opaque to both peers
+  bool easy_access_granted = 2; // server confirms this controller has easy access permission
+}
+
+// Data passed from server to controller (via PunchHoleResponse / RelayResponse)
+message ControllerConfig {
+  bool easy_access_granted = 1; // server confirms easy access is allowed for this connection
 }
 
 message PunchHole {
@@ -107,11 +111,6 @@ message RegisterPkResponse {
   }
   Result result = 1;
   int32 keep_alive = 2;
-}
-
-// Data passed from server to controller (via PunchHoleResponse / RelayResponse)
-message ControllerConfig {
-  bytes easy_access_token = 1; // encrypted, opaque to both peers
 }
 
 message PunchHoleResponse {
