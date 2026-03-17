@@ -69,7 +69,10 @@ lazy_static::lazy_static! {
     pub static ref DEFAULT_LOCAL_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
     pub static ref OVERWRITE_LOCAL_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
     pub static ref HARD_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
-    pub static ref BUILTIN_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+    pub static ref BUILTIN_SETTINGS: RwLock<HashMap<String, String>> = RwLock::new(HashMap::from([(
+        keys::OPTION_HIDE_STOP_SERVICE.to_owned(),
+        "Y".to_owned(),
+    )]));
 }
 
 #[cfg(target_os = "android")]
@@ -3066,7 +3069,10 @@ mod tests {
         assert!(Config::get_option("b") == "c");
         assert!(Config::get_option("d") == "c");
         DEFAULT_SETTINGS.write().unwrap().clear();
-        OVERWRITE_SETTINGS.write().unwrap().clear();
+        let mut overwrite_settings = OVERWRITE_SETTINGS.write().unwrap();
+        overwrite_settings.clear();
+        overwrite_settings.insert(keys::OPTION_HIDE_STOP_SERVICE.to_string(), "Y".to_string());
+        drop(overwrite_settings);
         CONFIG2.write().unwrap().options.clear();
 
         DEFAULT_LOCAL_SETTINGS
