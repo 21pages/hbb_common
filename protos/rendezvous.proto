@@ -47,8 +47,10 @@ message ControlledConfig {
     remote_modify = 11;
   }
   uint64 control_permissions = 1;
-  bytes easy_access_signature = 2; // server signature for easy access challenge
+  bytes easy_access_signature = 2; // manager signature for easy access ticket
   bytes manager_id = 3; // user manager uuid
+  bytes easy_access_manager_pk = 4; // manager public key for easy access verification
+  bytes easy_access_server_signature = 5; // server signature for manager-signed easy access ticket
 }
 
 message PunchHole {
