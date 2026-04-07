@@ -92,22 +92,31 @@ pub fn hide_cm() -> bool {
 }
 
 const VERSION_LEN: usize = 2;
+pub const VERSION_00_UUID: &str = "00";
+pub const VERSION_02_SYSTEM_USER: &str = "02";
 
 // Check if data is already encrypted by verifying:
-// 1) version prefix "00"
+// 1) known version prefix
 // 2) valid base64 payload
-// 3) decoded payload length >= secretbox::MACBYTES
+// 3) decoded payload length >= minimum payload size for that version
 //
 // We intentionally avoid trying to decrypt here because key mismatch would cause
 // false negatives.
 // Reference: secretbox::seal returns ciphertext length = plaintext length + MACBYTES
 // https://github.com/sodiumoxide/sodiumoxide/blob/3057acb1a030ad86ed8892a223d64036ab5e8523/src/crypto/secretbox/xsalsa20poly1305.rs#L67
 fn is_encrypted(v: &[u8]) -> bool {
-    if v.len() <= VERSION_LEN || !v.starts_with(b"00") {
+    if v.len() <= VERSION_LEN {
         return false;
     }
+    let min_len = if v.starts_with(VERSION_00_UUID.as_bytes()) {
+        sodiumoxide::crypto::secretbox::MACBYTES
+    } else if v.starts_with(VERSION_02_SYSTEM_USER.as_bytes()) {
+        sodiumoxide::crypto::secretbox::NONCEBYTES + sodiumoxide::crypto::secretbox::MACBYTES
+    } else {
+        return false;
+    };
     match base64::decode(&v[VERSION_LEN..], base64::Variant::Original) {
-        Ok(decoded) => decoded.len() >= sodiumoxide::crypto::secretbox::MACBYTES,
+        Ok(decoded) => decoded.len() >= min_len,
         Err(_) => false,
     }
 }
@@ -120,29 +129,38 @@ pub fn encrypt_str_or_original(s: &str, version: &str, max_len: usize) -> String
     if s.chars().count() > max_len {
         return String::default();
     }
-    if version == "00" {
-        if let Ok(s) = encrypt(s.as_bytes()) {
-            return version.to_owned() + &s;
-        }
+    if let Ok(s) = encrypt(s.as_bytes(), version) {
+        return version.to_owned() + &s;
     }
     s.to_owned()
+}
+
+fn known_version_prefix(v: &[u8]) -> Option<&str> {
+    if v.len() <= VERSION_LEN {
+        return None;
+    }
+    if v.starts_with(VERSION_00_UUID.as_bytes()) {
+        Some(VERSION_00_UUID)
+    } else if v.starts_with(VERSION_02_SYSTEM_USER.as_bytes()) {
+        Some(VERSION_02_SYSTEM_USER)
+    } else {
+        None
+    }
 }
 
 // String: password
 // bool: whether decryption is successful
 // bool: whether should store to re-encrypt when load
 // note: s.len() return length in bytes, s.chars().count() return char count
-//       &[..2] return the left 2 bytes, s.chars().take(2) return the left 2 chars
+//       avoid slicing `&str` by raw byte offsets unless the boundary is known-valid UTF-8
 pub fn decrypt_str_or_original(s: &str, current_version: &str) -> (String, bool, bool) {
-    if s.len() > VERSION_LEN {
-        if s.starts_with("00") {
-            if let Ok(v) = decrypt(s[VERSION_LEN..].as_bytes()) {
-                return (
-                    String::from_utf8_lossy(&v).to_string(),
-                    true,
-                    "00" != current_version,
-                );
-            }
+    if let Some(version) = known_version_prefix(s.as_bytes()) {
+        if let Ok(v) = decrypt(s[VERSION_LEN..].as_bytes(), version) {
+            return (
+                String::from_utf8_lossy(&v).to_string(),
+                true,
+                version != current_version,
+            );
         }
     }
 
@@ -163,12 +181,10 @@ pub fn encrypt_vec_or_original(v: &[u8], version: &str, max_len: usize) -> Vec<u
     if v.len() > max_len {
         return vec![];
     }
-    if version == "00" {
-        if let Ok(s) = encrypt(v) {
-            let mut version = version.to_owned().into_bytes();
-            version.append(&mut s.into_bytes());
-            return version;
-        }
+    if let Ok(s) = encrypt(v, version) {
+        let mut version = version.to_owned().into_bytes();
+        version.append(&mut s.into_bytes());
+        return version;
     }
     v.to_owned()
 }
@@ -177,12 +193,9 @@ pub fn encrypt_vec_or_original(v: &[u8], version: &str, max_len: usize) -> Vec<u
 // bool: whether decryption is successful
 // bool: whether should store to re-encrypt when load
 pub fn decrypt_vec_or_original(v: &[u8], current_version: &str) -> (Vec<u8>, bool, bool) {
-    if v.len() > VERSION_LEN {
-        let version = String::from_utf8_lossy(&v[..VERSION_LEN]);
-        if version == "00" {
-            if let Ok(v) = decrypt(&v[VERSION_LEN..]) {
-                return (v, true, version != current_version);
-            }
+    if let Some(version) = known_version_prefix(v) {
+        if let Ok(v) = decrypt(&v[VERSION_LEN..], version) {
+            return (v, true, version != current_version);
         }
     }
 
@@ -191,23 +204,57 @@ pub fn decrypt_vec_or_original(v: &[u8], current_version: &str) -> (Vec<u8>, boo
     (v.to_owned(), false, !v.is_empty() && !is_encrypted(v))
 }
 
-fn encrypt(v: &[u8]) -> Result<String, ()> {
+pub fn encrypt_raw_with_version(data: &[u8], version: &str) -> Result<Vec<u8>, ()> {
+    let mut out = version.as_bytes().to_vec();
+    out.extend(encrypt_raw(data, version)?);
+    Ok(out)
+}
+
+pub fn decrypt_raw_with_version_or_original(
+    data: &[u8],
+    current_version: &str,
+) -> (Vec<u8>, bool, bool) {
+    if let Some(version) = known_version_prefix(data) {
+        if let Ok(v) = decrypt_raw(&data[VERSION_LEN..], version) {
+            return (v, true, version != current_version);
+        }
+    }
+    (data.to_owned(), false, false)
+}
+
+fn encrypt(v: &[u8], version: &str) -> Result<String, ()> {
     if !v.is_empty() {
-        symmetric_crypt(v, true).map(|v| base64::encode(v, base64::Variant::Original))
+        encrypt_raw(v, version).map(|v| base64::encode(v, base64::Variant::Original))
     } else {
         Err(())
     }
 }
 
-fn decrypt(v: &[u8]) -> Result<Vec<u8>, ()> {
+fn decrypt(v: &[u8], version: &str) -> Result<Vec<u8>, ()> {
     if !v.is_empty() {
-        base64::decode(v, base64::Variant::Original).and_then(|v| symmetric_crypt(&v, false))
+        base64::decode(v, base64::Variant::Original).and_then(|v| decrypt_raw(&v, version))
     } else {
         Err(())
     }
 }
 
-pub fn symmetric_crypt(data: &[u8], encrypt: bool) -> Result<Vec<u8>, ()> {
+fn encrypt_raw(data: &[u8], version: &str) -> Result<Vec<u8>, ()> {
+    match version {
+        VERSION_00_UUID => symmetric_crypt_00_uuid(data, true),
+        VERSION_02_SYSTEM_USER => symmetric_crypt_02_system_user(data, true),
+        _ => Err(()),
+    }
+}
+
+fn decrypt_raw(data: &[u8], version: &str) -> Result<Vec<u8>, ()> {
+    match version {
+        VERSION_00_UUID => symmetric_crypt_00_uuid(data, false),
+        VERSION_02_SYSTEM_USER => symmetric_crypt_02_system_user(data, false),
+        _ => Err(()),
+    }
+}
+
+fn symmetric_crypt_00_uuid(data: &[u8], encrypt: bool) -> Result<Vec<u8>, ()> {
     use sodiumoxide::crypto::secretbox;
     use std::convert::TryInto;
 
@@ -238,6 +285,31 @@ pub fn symmetric_crypt(data: &[u8], encrypt: bool) -> Result<Vec<u8>, ()> {
     }
 }
 
+// Version 02 uses the system/user-scoped master key. During decryption it
+// falls back to version 00 for compatibility with unversioned stored payloads.
+pub fn symmetric_crypt_02_system_user(data: &[u8], encrypt: bool) -> Result<Vec<u8>, ()> {
+    use sodiumoxide::crypto::secretbox;
+    use std::convert::TryInto;
+
+    let keybuf = crate::secret_store::get_or_create_master_key().map_err(|_| ())?;
+    let key = secretbox::Key(keybuf.try_into().map_err(|_| ())?);
+
+    if encrypt {
+        let nonce = secretbox::gen_nonce();
+        let mut out = nonce.0.to_vec();
+        out.extend(secretbox::seal(data, &nonce, &key));
+        Ok(out)
+    } else {
+        if data.len() >= secretbox::NONCEBYTES + secretbox::MACBYTES {
+            let nonce = secretbox::Nonce(data[..secretbox::NONCEBYTES].try_into().map_err(|_| ())?);
+            if let Ok(v) = secretbox::open(&data[secretbox::NONCEBYTES..], &nonce, &key) {
+                return Ok(v);
+            }
+        }
+        symmetric_crypt_00_uuid(data, false)
+    }
+}
+
 mod test {
 
     #[test]
@@ -246,79 +318,88 @@ mod test {
         use rand::{thread_rng, Rng};
         use std::time::Instant;
 
-        let version = "00";
+        let version_system_user = VERSION_02_SYSTEM_USER;
+        let version_uuid = VERSION_00_UUID;
         let max_len = 128;
 
         println!("test str");
         let data = "1ü1111";
-        let encrypted = encrypt_str_or_original(data, version, max_len);
-        let (decrypted, succ, store) = decrypt_str_or_original(&encrypted, version);
+        let encrypted = encrypt_str_or_original(data, version_system_user, max_len);
+        let (decrypted, succ, store) = decrypt_str_or_original(&encrypted, version_system_user);
         println!("data: {data}");
         println!("encrypted: {encrypted}");
         println!("decrypted: {decrypted}");
         assert_eq!(data, decrypted);
-        assert_eq!(version, &encrypted[..2]);
+        assert_eq!(version_system_user, &encrypted[..2]);
         assert!(succ);
         assert!(!store);
         let (_, _, store) = decrypt_str_or_original(&encrypted, "99");
         assert!(store);
-        assert!(!decrypt_str_or_original(&decrypted, version).1);
+        assert!(!decrypt_str_or_original(&decrypted, version_system_user).1);
         assert_eq!(
-            encrypt_str_or_original(&encrypted, version, max_len),
+            encrypt_str_or_original(&encrypted, version_system_user, max_len),
             encrypted
         );
 
         println!("test vec");
         let data: Vec<u8> = "1ü1111".as_bytes().to_vec();
-        let encrypted = encrypt_vec_or_original(&data, version, max_len);
-        let (decrypted, succ, store) = decrypt_vec_or_original(&encrypted, version);
+        let encrypted = encrypt_vec_or_original(&data, version_system_user, max_len);
+        let (decrypted, succ, store) = decrypt_vec_or_original(&encrypted, version_system_user);
         println!("data: {data:?}");
         println!("encrypted: {encrypted:?}");
         println!("decrypted: {decrypted:?}");
         assert_eq!(data, decrypted);
-        assert_eq!(version.as_bytes(), &encrypted[..2]);
+        assert_eq!(version_system_user.as_bytes(), &encrypted[..2]);
         assert!(!store);
         assert!(succ);
         let (_, _, store) = decrypt_vec_or_original(&encrypted, "99");
         assert!(store);
-        assert!(!decrypt_vec_or_original(&decrypted, version).1);
+        assert!(!decrypt_vec_or_original(&decrypted, version_system_user).1);
         assert_eq!(
-            encrypt_vec_or_original(&encrypted, version, max_len),
+            encrypt_vec_or_original(&encrypted, version_system_user, max_len),
             encrypted
         );
 
         println!("test original");
-        let data = version.to_string() + "Hello World";
-        let (decrypted, succ, store) = decrypt_str_or_original(&data, version);
+        let data = version_system_user.to_string() + "Hello World";
+        let (decrypted, succ, store) = decrypt_str_or_original(&data, version_system_user);
         assert_eq!(data, decrypted);
         assert!(store);
         assert!(!succ);
-        let verbytes = version.as_bytes();
+        let verbytes = version_system_user.as_bytes();
         let data: Vec<u8> = vec![verbytes[0], verbytes[1], 1, 2, 3, 4, 5, 6];
-        let (decrypted, succ, store) = decrypt_vec_or_original(&data, version);
+        let (decrypted, succ, store) = decrypt_vec_or_original(&data, version_system_user);
         assert_eq!(data, decrypted);
         assert!(store);
         assert!(!succ);
-        let (_, succ, store) = decrypt_str_or_original("", version);
+        let (_, succ, store) = decrypt_str_or_original("", version_system_user);
         assert!(!store);
         assert!(!succ);
-        let (_, succ, store) = decrypt_vec_or_original(&[], version);
+        let (_, succ, store) = decrypt_vec_or_original(&[], version_system_user);
         assert!(!store);
         assert!(!succ);
         let data = "1ü1111";
-        assert_eq!(decrypt_str_or_original(data, version).0, data);
+        assert_eq!(decrypt_str_or_original(data, version_system_user).0, data);
         let data: Vec<u8> = "1ü1111".as_bytes().to_vec();
-        assert_eq!(decrypt_vec_or_original(&data, version).0, data);
+        assert_eq!(decrypt_vec_or_original(&data, version_system_user).0, data);
+
+        println!("test version 00 compatibility");
+        let legacy_encrypted = encrypt_str_or_original("legacy", version_uuid, max_len);
+        let (legacy_decrypted, succ, store) =
+            decrypt_str_or_original(&legacy_encrypted, version_system_user);
+        assert_eq!(legacy_decrypted, "legacy");
+        assert!(succ);
+        assert!(store);
 
         // Base64-shaped "00" prefixed values shorter than MACBYTES are treated
         // as original/plain values and should be stored.
         let data = "00YWJjZA==";
-        let (decrypted, succ, store) = decrypt_str_or_original(data, version);
+        let (decrypted, succ, store) = decrypt_str_or_original(data, version_system_user);
         assert_eq!(decrypted, data);
         assert!(!succ);
         assert!(store);
         let data = b"00YWJjZA==".to_vec();
-        let (decrypted, succ, store) = decrypt_vec_or_original(&data, version);
+        let (decrypted, succ, store) = decrypt_vec_or_original(&data, version_system_user);
         assert_eq!(decrypted, data);
         assert!(!succ);
         assert!(store);
@@ -329,11 +410,11 @@ mod test {
         let exact_mac_b64 =
             sodiumoxide::base64::encode(&exact_mac, sodiumoxide::base64::Variant::Original);
         let data = format!("00{exact_mac_b64}");
-        let (_, succ, store) = decrypt_str_or_original(&data, version);
+        let (_, succ, store) = decrypt_str_or_original(&data, version_system_user);
         assert!(!succ);
         assert!(!store);
         let data = data.into_bytes();
-        let (_, succ, store) = decrypt_vec_or_original(&data, version);
+        let (_, succ, store) = decrypt_vec_or_original(&data, version_system_user);
         assert!(!succ);
         assert!(!store);
 
@@ -345,11 +426,11 @@ mod test {
                 data.push(rng.gen_range(0..255));
             }
             let start: Instant = Instant::now();
-            let encrypted = encrypt_vec_or_original(&data, version, len);
+            let encrypted = encrypt_vec_or_original(&data, version_system_user, len);
             assert_ne!(data, decrypted);
             let t1 = start.elapsed();
             let start = Instant::now();
-            let (decrypted, _, _) = decrypt_vec_or_original(&encrypted, version);
+            let (decrypted, _, _) = decrypt_vec_or_original(&encrypted, version_system_user);
             let t2 = start.elapsed();
             assert_eq!(data, decrypted);
             println!("{name}");
@@ -402,11 +483,11 @@ mod test {
         assert!(is_encrypted(exact_mac_candidate.as_bytes()));
 
         // Real encrypted data should be detected
-        let version = "00";
+        let version_uuid = VERSION_00_UUID;
         let max_len = 128;
-        let encrypted_str = encrypt_str_or_original("1", version, max_len);
+        let encrypted_str = encrypt_str_or_original("1", version_uuid, max_len);
         assert!(is_encrypted(encrypted_str.as_bytes()));
-        let encrypted_vec = encrypt_vec_or_original(b"1", version, max_len);
+        let encrypted_vec = encrypt_vec_or_original(b"1", version_uuid, max_len);
         assert!(is_encrypted(&encrypted_vec));
 
         // Original unencrypted data should not be detected as encrypted
@@ -420,17 +501,17 @@ mod test {
         use sodiumoxide::base64::{decode, Variant};
         use sodiumoxide::crypto::secretbox;
 
-        let version = "00";
+        let version_user_scope = VERSION_02_SYSTEM_USER;
         let max_len = 128;
 
-        let encrypted_str = encrypt_str_or_original("1", version, max_len);
+        let encrypted_str = encrypt_str_or_original("1", version_user_scope, max_len);
         let decoded = decode(&encrypted_str.as_bytes()[VERSION_LEN..], Variant::Original).unwrap();
         assert!(
             decoded.len() >= secretbox::MACBYTES,
             "decoded encrypted payload must be at least MACBYTES"
         );
 
-        let encrypted_vec = encrypt_vec_or_original(b"1", version, max_len);
+        let encrypted_vec = encrypt_vec_or_original(b"1", version_user_scope, max_len);
         let decoded = decode(&encrypted_vec[VERSION_LEN..], Variant::Original).unwrap();
         assert!(
             decoded.len() >= secretbox::MACBYTES,
@@ -438,7 +519,41 @@ mod test {
         );
     }
 
-    // Test decryption fallback when data was encrypted with key_pair but decryption tries machine_uid first
+    #[test]
+    fn test_decrypt_str_or_original_non_ascii_prefix_does_not_panic() {
+        use super::*;
+
+        let data = "中a";
+        let (decrypted, succ, store) = decrypt_str_or_original(data, VERSION_02_SYSTEM_USER);
+        assert_eq!(decrypted, data);
+        assert!(!succ);
+        assert!(store);
+    }
+
+    #[test]
+    fn test_raw_versioned_roundtrip() {
+        use super::*;
+
+        let version_user_scope = VERSION_02_SYSTEM_USER;
+        let version_uuid = VERSION_00_UUID;
+        let data = b"raw payload";
+
+        let encrypted = encrypt_raw_with_version(data, version_user_scope).unwrap();
+        let (decrypted, succ, store) =
+            decrypt_raw_with_version_or_original(&encrypted, version_user_scope);
+        assert_eq!(decrypted, data);
+        assert!(succ);
+        assert!(!store);
+
+        let legacy = encrypt_raw_with_version(data, version_uuid).unwrap();
+        let (decrypted, succ, store) =
+            decrypt_raw_with_version_or_original(&legacy, version_user_scope);
+        assert_eq!(decrypted, data);
+        assert!(succ);
+        assert!(store);
+    }
+
+    // Test decryption fallback when data was encrypted with key_pair but decryption tries machine_uid first.
     #[test]
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     fn test_decrypt_with_pk_fallback() {
@@ -463,8 +578,8 @@ mod test {
         let pk_key = secretbox::Key(pk_keybuf.try_into().unwrap());
         let encrypted = secretbox::seal(data, &nonce, &pk_key);
 
-        // Decrypt using symmetric_crypt (should fallback to pk since uuid differs)
-        let decrypted = super::symmetric_crypt(&encrypted, false);
+        // Decrypt using version 02 path; it should fallback to pk since uuid differs.
+        let decrypted = super::symmetric_crypt_02_system_user(&encrypted, false);
         assert!(
             decrypted.is_ok(),
             "Decryption with pk fallback should succeed"

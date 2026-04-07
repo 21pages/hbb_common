@@ -1,5 +1,8 @@
+use crate::secret_store::{SecretStoreError, SecretStoreResult};
 use std::{
     collections::VecDeque,
+    convert::TryInto,
+    fs, ptr,
     sync::{Arc, Mutex},
     time::Instant,
 };
@@ -18,6 +21,19 @@ use winapi::{
         winnt::{
             HANDLE, OSVERSIONINFOEXW, VER_BUILDNUMBER, VER_GREATER_EQUAL, VER_MAJORVERSION,
             VER_MINORVERSION, VER_SERVICEPACKMAJOR, VER_SERVICEPACKMINOR,
+        },
+    },
+};
+use windows::{
+    core::{PCWSTR, PWSTR},
+    Win32::{
+        Foundation::{LocalFree, ERROR_NOT_FOUND, HLOCAL},
+        Security::{
+            Credentials::{
+                CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE,
+                CRED_TYPE_GENERIC,
+            },
+            Cryptography::{CryptProtectData, CryptUnprotectData, CRYPT_INTEGER_BLOB},
         },
     },
 };
@@ -195,4 +211,179 @@ pub fn is_windows_version_or_greater(
     };
 
     result == TRUE
+}
+
+struct CredentialGuard(*mut CREDENTIALW);
+
+impl Drop for CredentialGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { CredFree(self.0 as _) };
+        }
+    }
+}
+
+pub fn load_secret(service: &str, account: &str) -> SecretStoreResult<Vec<u8>> {
+    load_secret_credential(service, account)
+}
+
+pub fn store_secret(service: &str, account: &str, secret: &[u8]) -> SecretStoreResult<()> {
+    store_secret_credential(service, account, secret)
+}
+
+pub fn load_secret_credential(service: &str, account: &str) -> SecretStoreResult<Vec<u8>> {
+    let target = to_wide_null(&credential_target_name(service, account));
+    let mut credential = ptr::null_mut();
+    match unsafe {
+        CredReadW(
+            PCWSTR::from_raw(target.as_ptr()),
+            CRED_TYPE_GENERIC,
+            None,
+            &mut credential,
+        )
+    } {
+        Ok(_) => {}
+        Err(err) if err.code() == ERROR_NOT_FOUND.to_hresult() => {
+            return Err(SecretStoreError::NotFound);
+        }
+        Err(err) => {
+            return Err(SecretStoreError::backend(
+                "failed to read Windows Credential Manager secret",
+                err,
+            ));
+        }
+    }
+    if credential.is_null() {
+        return Err(SecretStoreError::backend_message(
+            "failed to read Windows Credential Manager secret",
+            "CredReadW returned a null credential pointer",
+        ));
+    }
+
+    let _guard = CredentialGuard(credential);
+    let credential = unsafe { &*credential };
+    if credential.CredentialBlob.is_null() {
+        return Ok(Vec::new());
+    }
+
+    Ok(unsafe {
+        std::slice::from_raw_parts(
+            credential.CredentialBlob,
+            credential.CredentialBlobSize as usize,
+        )
+    }
+    .to_vec())
+}
+
+pub fn store_secret_credential(
+    service: &str,
+    account: &str,
+    secret: &[u8],
+) -> SecretStoreResult<()> {
+    let target = to_wide_null(&credential_target_name(service, account));
+    let username = to_wide_null(account);
+    let mut credential = CREDENTIALW::default();
+    credential.Type = CRED_TYPE_GENERIC;
+    credential.TargetName = PWSTR::from_raw(target.as_ptr() as *mut _);
+    credential.CredentialBlobSize = secret.len().try_into().map_err(|_| {
+        SecretStoreError::backend_message(
+            "failed to prepare Windows Credential Manager secret",
+            "secret is too large for CredentialBlobSize",
+        )
+    })?;
+    credential.CredentialBlob = secret.as_ptr() as *mut u8;
+    credential.Persist = CRED_PERSIST_LOCAL_MACHINE;
+    credential.UserName = PWSTR::from_raw(username.as_ptr() as *mut _);
+    unsafe { CredWriteW(&credential, 0) }.map_err(|err| {
+        SecretStoreError::backend("failed to write Windows Credential Manager secret", err)
+    })?;
+    Ok(())
+}
+
+pub fn dpapi_write_file(path: &std::path::Path, key: &[u8]) -> SecretStoreResult<()> {
+    let in_blob = CRYPT_INTEGER_BLOB {
+        cbData: key.len().try_into().map_err(|_| {
+            SecretStoreError::backend_message(
+                "failed to prepare Windows DPAPI plaintext blob",
+                "input is too large for CRYPT_INTEGER_BLOB",
+            )
+        })?,
+        pbData: key.as_ptr() as *mut u8,
+    };
+    let mut out_blob = CRYPT_INTEGER_BLOB::default();
+    unsafe { CryptProtectData(&in_blob, PCWSTR::null(), None, None, None, 0, &mut out_blob) }
+        .map_err(|err| SecretStoreError::backend("failed to encrypt Windows DPAPI payload", err))?;
+    let encrypted = blob_to_vec(&out_blob)?;
+    free_local_buffer(out_blob.pbData);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            SecretStoreError::backend("failed to create Windows DPAPI output directory", err)
+        })?;
+    }
+    fs::write(path, encrypted).map_err(|err| {
+        SecretStoreError::backend("failed to write Windows DPAPI output file", err)
+    })?;
+    Ok(())
+}
+
+pub fn dpapi_read_file(path: &std::path::Path, expected_len: usize) -> SecretStoreResult<Vec<u8>> {
+    let encrypted = fs::read(path).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            SecretStoreError::NotFound
+        } else {
+            SecretStoreError::backend("failed to read Windows DPAPI input file", err)
+        }
+    })?;
+    let in_blob = CRYPT_INTEGER_BLOB {
+        cbData: encrypted.len().try_into().map_err(|_| {
+            SecretStoreError::backend_message(
+                "failed to prepare Windows DPAPI ciphertext blob",
+                "input is too large for CRYPT_INTEGER_BLOB",
+            )
+        })?,
+        pbData: encrypted.as_ptr() as *mut u8,
+    };
+    let mut out_blob = CRYPT_INTEGER_BLOB::default();
+    unsafe { CryptUnprotectData(&in_blob, None, None, None, None, 0, &mut out_blob) }
+        .map_err(|err| SecretStoreError::backend("failed to decrypt Windows DPAPI payload", err))?;
+    let decrypted = blob_to_vec(&out_blob)?;
+    free_local_buffer(out_blob.pbData);
+    if decrypted.len() == expected_len {
+        Ok(decrypted)
+    } else {
+        Err(SecretStoreError::InvalidLength {
+            expected: expected_len,
+            actual: decrypted.len(),
+        })
+    }
+}
+
+fn blob_to_vec(blob: &CRYPT_INTEGER_BLOB) -> SecretStoreResult<Vec<u8>> {
+    if blob.cbData == 0 {
+        return Ok(Vec::new());
+    }
+    if blob.pbData.is_null() {
+        Err(SecretStoreError::backend_message(
+            "failed to read Windows blob",
+            "blob pointer was null",
+        ))
+    } else {
+        Ok(unsafe { std::slice::from_raw_parts(blob.pbData, blob.cbData as usize).to_vec() })
+    }
+}
+
+fn free_local_buffer(buffer: *mut u8) {
+    if !buffer.is_null() {
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(buffer.cast())));
+        }
+    }
+}
+
+fn credential_target_name(service: &str, account: &str) -> String {
+    format!("{service}:{account}")
+}
+
+fn to_wide_null(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
 }

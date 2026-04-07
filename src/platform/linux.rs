@@ -1,4 +1,6 @@
+use crate::secret_store::{SecretStoreError, SecretStoreResult};
 use crate::ResultType;
+use dbus_secret_service::{EncryptionType, Item, SecretService};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -495,6 +497,84 @@ pub fn get_home_dir_trusted() -> Option<PathBuf> {
             None
         }
     }
+}
+
+pub fn load_secret_store_key(service: &str, account: &str) -> SecretStoreResult<Vec<u8>> {
+    let attrs = HashMap::from([("service", service), ("account", account)]);
+    let ss = SecretService::connect(EncryptionType::Dh)
+        .map_err(|err| SecretStoreError::backend("failed to connect to Linux Secret Service", err))?;
+    let search = ss
+        .search_items(attrs)
+        .map_err(|err| SecretStoreError::backend("failed to search Linux Secret Service items", err))?;
+    if !search.locked.is_empty() {
+        let item_refs: Vec<&Item> = search.locked.iter().collect();
+        ss.unlock_all(item_refs.as_slice())
+            .map_err(|err| SecretStoreError::backend("failed to unlock Linux Secret Service items", err))?;
+    }
+
+    let mut saw_item = false;
+    let mut last_error = None;
+    for item in search.unlocked.iter().chain(search.locked.iter()) {
+        saw_item = true;
+        match item.get_secret() {
+            Ok(secret) => return Ok(secret),
+            Err(err) => last_error = Some(err.to_string()),
+        }
+    }
+
+    if saw_item {
+        Err(SecretStoreError::backend_message(
+            "failed to read secret from Linux Secret Service",
+            last_error.unwrap_or_else(|| "unknown secret read error".to_owned()),
+        ))
+    } else {
+        Err(SecretStoreError::NotFound)
+    }
+}
+
+pub fn store_secret_store_key(
+    service: &str,
+    account: &str,
+    secret: &[u8],
+) -> SecretStoreResult<()> {
+    let ss = SecretService::connect(EncryptionType::Dh)
+        .map_err(|err| SecretStoreError::backend("failed to connect to Linux Secret Service", err))?;
+    let collection = ss
+        .get_default_collection()
+        .map_err(|err| SecretStoreError::backend("failed to get Linux Secret Service collection", err))?;
+    if collection
+        .is_locked()
+        .map_err(|err| SecretStoreError::backend("failed to query Linux Secret Service lock state", err))?
+    {
+        collection
+            .unlock()
+            .map_err(|err| SecretStoreError::backend("failed to unlock Linux Secret Service collection", err))?;
+    }
+    let attrs = HashMap::from([("service", service), ("account", account)]);
+    let label = format!("{service} {account}");
+    collection
+        .create_item(&label, attrs, secret, true, "application/octet-stream")
+        .map_err(|err| SecretStoreError::backend("failed to create Linux Secret Service item", err))?;
+    Ok(())
+}
+
+/// Use Secret Service as the default Linux secret backend.
+///
+/// Do not use the kernel keyutils persistent keyring for RustDesk's master key
+/// or device-identity style secrets:
+/// - it is not a durable application secret store and can disappear due to
+///   kernel / login-session lifetime rules;
+/// - a missing read here is especially dangerous because upper layers may treat
+///   it as "secret lost" and regenerate a new master key, which then makes
+///   previously encrypted local config unreadable;
+/// - this project needs stable reads first, even if the desktop secret service
+///   is not ideal in every Linux environment.
+pub fn load_secret(service: &str, account: &str) -> SecretStoreResult<Vec<u8>> {
+    load_secret_store_key(service, account)
+}
+
+pub fn store_secret(service: &str, account: &str, secret: &[u8]) -> SecretStoreResult<()> {
+    store_secret_store_key(service, account, secret)
 }
 
 #[cfg(test)]
