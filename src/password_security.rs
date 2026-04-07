@@ -92,22 +92,31 @@ pub fn hide_cm() -> bool {
 }
 
 const VERSION_LEN: usize = 2;
+const LEGACY_VERSION: &str = "00";
+pub const CURRENT_ENCRYPT_VERSION: &str = "02";
 
 // Check if data is already encrypted by verifying:
-// 1) version prefix "00"
+// 1) known version prefix
 // 2) valid base64 payload
-// 3) decoded payload length >= secretbox::MACBYTES
+// 3) decoded payload length >= minimum payload size for that version
 //
 // We intentionally avoid trying to decrypt here because key mismatch would cause
 // false negatives.
 // Reference: secretbox::seal returns ciphertext length = plaintext length + MACBYTES
 // https://github.com/sodiumoxide/sodiumoxide/blob/3057acb1a030ad86ed8892a223d64036ab5e8523/src/crypto/secretbox/xsalsa20poly1305.rs#L67
 fn is_encrypted(v: &[u8]) -> bool {
-    if v.len() <= VERSION_LEN || !v.starts_with(b"00") {
+    if v.len() <= VERSION_LEN {
         return false;
     }
+    let min_len = match std::str::from_utf8(&v[..VERSION_LEN]).ok() {
+        Some(LEGACY_VERSION) => sodiumoxide::crypto::secretbox::MACBYTES,
+        Some(CURRENT_ENCRYPT_VERSION) => {
+            sodiumoxide::crypto::secretbox::NONCEBYTES + sodiumoxide::crypto::secretbox::MACBYTES
+        }
+        _ => return false,
+    };
     match base64::decode(&v[VERSION_LEN..], base64::Variant::Original) {
-        Ok(decoded) => decoded.len() >= sodiumoxide::crypto::secretbox::MACBYTES,
+        Ok(decoded) => decoded.len() >= min_len,
         Err(_) => false,
     }
 }
@@ -120,12 +129,21 @@ pub fn encrypt_str_or_original(s: &str, version: &str, max_len: usize) -> String
     if s.chars().count() > max_len {
         return String::default();
     }
-    if version == "00" {
-        if let Ok(s) = encrypt(s.as_bytes()) {
-            return version.to_owned() + &s;
-        }
+    if let Ok(s) = encrypt(s.as_bytes(), version) {
+        return version.to_owned() + &s;
     }
     s.to_owned()
+}
+
+fn known_version_prefix_str(s: &str) -> Option<&str> {
+    if s.len() <= VERSION_LEN {
+        return None;
+    }
+    match &s[..VERSION_LEN] {
+        LEGACY_VERSION => Some(LEGACY_VERSION),
+        CURRENT_ENCRYPT_VERSION => Some(CURRENT_ENCRYPT_VERSION),
+        _ => None,
+    }
 }
 
 // String: password
@@ -134,15 +152,13 @@ pub fn encrypt_str_or_original(s: &str, version: &str, max_len: usize) -> String
 // note: s.len() return length in bytes, s.chars().count() return char count
 //       &[..2] return the left 2 bytes, s.chars().take(2) return the left 2 chars
 pub fn decrypt_str_or_original(s: &str, current_version: &str) -> (String, bool, bool) {
-    if s.len() > VERSION_LEN {
-        if s.starts_with("00") {
-            if let Ok(v) = decrypt(s[VERSION_LEN..].as_bytes()) {
-                return (
-                    String::from_utf8_lossy(&v).to_string(),
-                    true,
-                    "00" != current_version,
-                );
-            }
+    if let Some(version) = known_version_prefix_str(s) {
+        if let Ok(v) = decrypt(s[VERSION_LEN..].as_bytes(), version) {
+            return (
+                String::from_utf8_lossy(&v).to_string(),
+                true,
+                version != current_version,
+            );
         }
     }
 
@@ -163,12 +179,10 @@ pub fn encrypt_vec_or_original(v: &[u8], version: &str, max_len: usize) -> Vec<u
     if v.len() > max_len {
         return vec![];
     }
-    if version == "00" {
-        if let Ok(s) = encrypt(v) {
-            let mut version = version.to_owned().into_bytes();
-            version.append(&mut s.into_bytes());
-            return version;
-        }
+    if let Ok(s) = encrypt(v, version) {
+        let mut version = version.to_owned().into_bytes();
+        version.append(&mut s.into_bytes());
+        return version;
     }
     v.to_owned()
 }
@@ -178,9 +192,13 @@ pub fn encrypt_vec_or_original(v: &[u8], version: &str, max_len: usize) -> Vec<u
 // bool: whether should store to re-encrypt when load
 pub fn decrypt_vec_or_original(v: &[u8], current_version: &str) -> (Vec<u8>, bool, bool) {
     if v.len() > VERSION_LEN {
-        let version = String::from_utf8_lossy(&v[..VERSION_LEN]);
-        if version == "00" {
-            if let Ok(v) = decrypt(&v[VERSION_LEN..]) {
+        let version = std::str::from_utf8(&v[..VERSION_LEN]).ok();
+        if matches!(
+            version,
+            Some(LEGACY_VERSION) | Some(CURRENT_ENCRYPT_VERSION)
+        ) {
+            let version = version.unwrap();
+            if let Ok(v) = decrypt(&v[VERSION_LEN..], version) {
                 return (v, true, version != current_version);
             }
         }
@@ -191,23 +209,62 @@ pub fn decrypt_vec_or_original(v: &[u8], current_version: &str) -> (Vec<u8>, boo
     (v.to_owned(), false, !v.is_empty() && !is_encrypted(v))
 }
 
-fn encrypt(v: &[u8]) -> Result<String, ()> {
+fn encrypt(v: &[u8], version: &str) -> Result<String, ()> {
     if !v.is_empty() {
-        symmetric_crypt(v, true).map(|v| base64::encode(v, base64::Variant::Original))
+        encrypt_raw(v, version).map(|v| base64::encode(v, base64::Variant::Original))
     } else {
         Err(())
     }
 }
 
-fn decrypt(v: &[u8]) -> Result<Vec<u8>, ()> {
+fn decrypt(v: &[u8], version: &str) -> Result<Vec<u8>, ()> {
     if !v.is_empty() {
-        base64::decode(v, base64::Variant::Original).and_then(|v| symmetric_crypt(&v, false))
+        base64::decode(v, base64::Variant::Original).and_then(|v| decrypt_raw(&v, version))
     } else {
         Err(())
+    }
+}
+
+fn encrypt_raw(data: &[u8], version: &str) -> Result<Vec<u8>, ()> {
+    match version {
+        LEGACY_VERSION => legacy_symmetric_crypt(data, true),
+        CURRENT_ENCRYPT_VERSION => symmetric_crypt(data, true),
+        _ => Err(()),
+    }
+}
+
+fn decrypt_raw(data: &[u8], version: &str) -> Result<Vec<u8>, ()> {
+    match version {
+        LEGACY_VERSION => legacy_symmetric_crypt(data, false),
+        CURRENT_ENCRYPT_VERSION => symmetric_crypt(data, false),
+        _ => Err(()),
     }
 }
 
 pub fn symmetric_crypt(data: &[u8], encrypt: bool) -> Result<Vec<u8>, ()> {
+    use sodiumoxide::crypto::secretbox;
+    use std::convert::TryInto;
+
+    let keybuf = crate::secret_store::get_or_create_master_key()?;
+    let key = secretbox::Key(keybuf.try_into().map_err(|_| ())?);
+
+    if encrypt {
+        let nonce = secretbox::gen_nonce();
+        let mut out = nonce.0.to_vec();
+        out.extend(secretbox::seal(data, &nonce, &key));
+        Ok(out)
+    } else {
+        if data.len() >= secretbox::NONCEBYTES + secretbox::MACBYTES {
+            let nonce = secretbox::Nonce(data[..secretbox::NONCEBYTES].try_into().map_err(|_| ())?);
+            if let Ok(v) = secretbox::open(&data[secretbox::NONCEBYTES..], &nonce, &key) {
+                return Ok(v);
+            }
+        }
+        legacy_symmetric_crypt(data, false)
+    }
+}
+
+fn legacy_symmetric_crypt(data: &[u8], encrypt: bool) -> Result<Vec<u8>, ()> {
     use sodiumoxide::crypto::secretbox;
     use std::convert::TryInto;
 
@@ -246,7 +303,8 @@ mod test {
         use rand::{thread_rng, Rng};
         use std::time::Instant;
 
-        let version = "00";
+        let version = CURRENT_ENCRYPT_VERSION;
+        let legacy_version = LEGACY_VERSION;
         let max_len = 128;
 
         println!("test str");
@@ -309,6 +367,13 @@ mod test {
         assert_eq!(decrypt_str_or_original(data, version).0, data);
         let data: Vec<u8> = "1ü1111".as_bytes().to_vec();
         assert_eq!(decrypt_vec_or_original(&data, version).0, data);
+
+        println!("test legacy compatibility");
+        let legacy_encrypted = encrypt_str_or_original("legacy", legacy_version, max_len);
+        let (legacy_decrypted, succ, store) = decrypt_str_or_original(&legacy_encrypted, version);
+        assert_eq!(legacy_decrypted, "legacy");
+        assert!(succ);
+        assert!(store);
 
         // Base64-shaped "00" prefixed values shorter than MACBYTES are treated
         // as original/plain values and should be stored.
@@ -402,7 +467,7 @@ mod test {
         assert!(is_encrypted(exact_mac_candidate.as_bytes()));
 
         // Real encrypted data should be detected
-        let version = "00";
+        let version = LEGACY_VERSION;
         let max_len = 128;
         let encrypted_str = encrypt_str_or_original("1", version, max_len);
         assert!(is_encrypted(encrypted_str.as_bytes()));
@@ -420,7 +485,7 @@ mod test {
         use sodiumoxide::base64::{decode, Variant};
         use sodiumoxide::crypto::secretbox;
 
-        let version = "00";
+        let version = CURRENT_ENCRYPT_VERSION;
         let max_len = 128;
 
         let encrypted_str = encrypt_str_or_original("1", version, max_len);

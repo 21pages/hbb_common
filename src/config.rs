@@ -25,7 +25,7 @@ use crate::{
     log,
     password_security::{
         decrypt_str_or_original, decrypt_vec_or_original, encrypt_str_or_original,
-        encrypt_vec_or_original, symmetric_crypt,
+        encrypt_vec_or_original, symmetric_crypt, CURRENT_ENCRYPT_VERSION,
     },
 };
 
@@ -39,7 +39,7 @@ pub const READ_TIMEOUT: u64 = 18_000;
 pub const REG_INTERVAL: i64 = 15_000;
 pub const COMPRESS_LEVEL: i32 = 3;
 const SERIAL: i32 = 3;
-const PASSWORD_ENC_VERSION: &str = "00";
+const PASSWORD_ENC_VERSION: &str = CURRENT_ENCRYPT_VERSION;
 pub const ENCRYPT_MAX_LEN: usize = 128; // used for password, pin, etc, not for all
 
 const PERMANENT_PASSWORD_HASH_PREFIX: &str = "01";
@@ -658,12 +658,13 @@ impl Config {
             return false;
         }
 
-        if config.password.starts_with(PASSWORD_ENC_VERSION) {
-            let (plain, decrypted, looks_like_plaintext) =
-                decrypt_str_or_original(&config.password, PASSWORD_ENC_VERSION);
+        let (plain, decrypted, looks_like_plaintext) =
+            decrypt_str_or_original(&config.password, PASSWORD_ENC_VERSION);
+        if decrypted || !looks_like_plaintext {
             // `decrypt_str_or_original` returns (value, decrypted_ok, should_store).
-            // If the value looks like an encrypted payload ("00" + base64 with MAC) but cannot be
-            // decrypted on this machine, it is most likely copied from another device or corrupted.
+            // If the value looks like an encrypted payload (legacy "00" or current "02")
+            // but cannot be decrypted on this machine, it is most likely copied from another
+            // device or corrupted.
             // In normal single-machine setups this should be extremely rare, so keep it as-is.
             if !decrypted && !looks_like_plaintext {
                 return false;
