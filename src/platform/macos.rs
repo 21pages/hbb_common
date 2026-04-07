@@ -1,3 +1,4 @@
+use crate::secret_store::SecretStoreResult;
 use crate::ResultType;
 use osascript;
 use serde_derive::{Deserialize, Serialize};
@@ -52,4 +53,21 @@ pub fn alert(
         buttons,
     })?;
     Ok(result.button)
+}
+
+/// RustDesk's default macOS path intentionally uses the traditional keychain.
+///
+/// The Apple Data Protection Keychain is closer to the iOS model and can reject
+/// normal desktop / CLI execution contexts even when the `(service, account)`
+/// values are valid. For the desktop app we want the broadly compatible login
+/// keychain-backed behavior here, which matches Chromium's desktop `SecItem*`
+/// generic-password route.
+pub fn load_secret(service: &str, account: &str) -> SecretStoreResult<Vec<u8>> {
+    crate::platform::apple::load_secret_keychain_generic(service, account)
+}
+
+/// See `load_secret`: the default macOS store path deliberately stays on the
+/// legacy keychain instead of the protected-data store.
+pub fn store_secret(service: &str, account: &str, secret: &[u8]) -> SecretStoreResult<()> {
+    crate::platform::apple::store_secret_keychain_generic(service, account, secret)
 }
