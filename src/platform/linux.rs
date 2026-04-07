@@ -1,8 +1,29 @@
-use crate::ResultType;
+use crate::{config::APP_NAME, log, ResultType};
+use dbus::{
+    arg::{
+        OwnedFd as DbusOwnedFd, PropMap as DbusPropMap, ReadAll as DbusReadAll,
+        TypeMismatchError as DbusTypeMismatchError,
+    },
+    blocking::Connection as DbusConnection,
+    message::SignalArgs as DbusSignalArgs,
+    strings::BusName as DbusBusName,
+    Message as DbusMessage,
+};
+use dbus_secret_service::{EncryptionType, Item, SecretService};
+use sha2::{Digest, Sha256};
+use sodiumoxide::crypto::secretbox;
 use std::{
     collections::HashMap,
+    fs::{self, File, OpenOptions},
+    io::{Read, Seek, SeekFrom},
+    os::unix::{fs::OpenOptionsExt, io::AsRawFd},
     path::{Path, PathBuf},
     process::Command,
+    sync::{
+        mpsc::{channel, Receiver, Sender, TryRecvError},
+        OnceLock,
+    },
+    time::Duration,
 };
 use users::{get_current_uid, get_user_by_uid, os::unix::UserExt};
 
@@ -15,9 +36,16 @@ use sctk::{
     registry::{ProvidesRegistryState, RegistryState},
 };
 
+use super::{SecretStoreError, SecretStoreResult};
+
 lazy_static::lazy_static! {
     pub static ref DISTRO: Distro = Distro::new();
 }
+
+const MASTER_KEY_LEN: usize = secretbox::KEYBYTES;
+const MASTER_KEY_ACCOUNT: &str = "secret";
+
+static MASTER_KEY: OnceLock<Vec<u8>> = OnceLock::new();
 
 // to-do: There seems to be some runtime issue that causes the audit logs to be generated.
 // We may need to fix this and remove this workaround in the future.
@@ -497,6 +525,383 @@ pub fn get_home_dir_trusted() -> Option<PathBuf> {
     }
 }
 
+const FLATPAK_PORTAL_DEST: &str = "org.freedesktop.portal.Desktop";
+const FLATPAK_PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
+const FLATPAK_PORTAL_SECRET_INTERFACE: &str = "org.freedesktop.portal.Secret";
+const FLATPAK_PORTAL_REQUEST_TIMEOUT_SECS: u64 = 30;
+const FLATPAK_SECRET_DERIVE_INFO: &[u8] = b"hbb-common-flatpak-crypto-root-v1";
+
+#[derive(Debug)]
+struct PortalRequestResponse {
+    response: u32,
+    results: DbusPropMap,
+}
+
+impl DbusReadAll for PortalRequestResponse {
+    fn read(i: &mut dbus::arg::Iter) -> Result<Self, DbusTypeMismatchError> {
+        Ok(Self {
+            response: i.read()?,
+            results: i.read()?,
+        })
+    }
+}
+
+impl DbusSignalArgs for PortalRequestResponse {
+    const NAME: &'static str = "Response";
+    const INTERFACE: &'static str = "org.freedesktop.portal.Request";
+}
+
+#[inline]
+fn is_flatpak() -> bool {
+    PathBuf::from("/.flatpak-info").exists()
+}
+
+fn retrieve_flatpak_portal_secret() -> SecretStoreResult<Vec<u8>> {
+    let conn = DbusConnection::new_session().map_err(|err| {
+        SecretStoreError::backend("failed to connect to xdg-desktop-portal session bus", err)
+    })?;
+
+    let sender: DbusBusName<'static> = FLATPAK_PORTAL_DEST.into();
+    let rule = PortalRequestResponse::match_rule(Some(&sender), None).static_clone();
+    let (tx, rx): (
+        Sender<PortalRequestResponse>,
+        Receiver<PortalRequestResponse>,
+    ) = channel();
+    let match_token = conn
+        .add_match(
+            rule,
+            move |signal: PortalRequestResponse, _: &DbusConnection, _: &DbusMessage| {
+                let _ = tx.send(signal);
+                false
+            },
+        )
+        .map_err(|err| {
+            SecretStoreError::backend(
+                "failed to subscribe to xdg-desktop-portal secret response",
+                err,
+            )
+        })?;
+
+    let mut secret_file = open_unlinked_temp_secret_file()?;
+    let portal_fd = dup_dbus_fd(secret_file.as_raw_fd())?;
+    let portal_proxy = conn.with_proxy(
+        FLATPAK_PORTAL_DEST,
+        FLATPAK_PORTAL_PATH,
+        Duration::from_millis(2000),
+    );
+    let call_result: Result<(dbus::Path<'static>,), dbus::Error> = portal_proxy.method_call(
+        FLATPAK_PORTAL_SECRET_INTERFACE,
+        "RetrieveSecret",
+        (portal_fd, DbusPropMap::new()),
+    );
+    if let Err(err) = call_result {
+        let _ = conn.remove_match(match_token);
+        return Err(SecretStoreError::backend(
+            "failed to request xdg-desktop-portal secret",
+            err,
+        ));
+    }
+
+    let response = wait_for_flatpak_portal_response(&conn, &rx);
+    let _ = conn.remove_match(match_token);
+    let response = response?;
+    if response.response != 0 {
+        let detail = if response.results.is_empty() {
+            format!("request failed with response code {}", response.response)
+        } else {
+            format!(
+                "request failed with response code {} and {} result fields",
+                response.response,
+                response.results.len()
+            )
+        };
+        return Err(SecretStoreError::backend_message(
+            "failed to retrieve xdg-desktop-portal secret",
+            detail,
+        ));
+    }
+
+    secret_file.seek(SeekFrom::Start(0)).map_err(|err| {
+        SecretStoreError::backend("failed to rewind xdg-desktop-portal secret buffer", err)
+    })?;
+    let mut secret = Vec::new();
+    secret_file.read_to_end(&mut secret).map_err(|err| {
+        SecretStoreError::backend("failed to read xdg-desktop-portal secret buffer", err)
+    })?;
+    if secret.is_empty() {
+        return Err(SecretStoreError::backend_message(
+            "failed to retrieve xdg-desktop-portal secret",
+            "portal returned an empty secret buffer",
+        ));
+    }
+    Ok(secret)
+}
+
+fn wait_for_flatpak_portal_response(
+    conn: &DbusConnection,
+    rx: &Receiver<PortalRequestResponse>,
+) -> SecretStoreResult<PortalRequestResponse> {
+    let one_second = Duration::from_millis(1000);
+    for _ in 0..FLATPAK_PORTAL_REQUEST_TIMEOUT_SECS {
+        match rx.try_recv() {
+            Ok(signal) => return Ok(signal),
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => break,
+        }
+        match conn.process(one_second) {
+            Ok(false) => continue,
+            Ok(true) => match rx.try_recv() {
+                Ok(signal) => return Ok(signal),
+                Err(TryRecvError::Empty) => continue,
+                Err(TryRecvError::Disconnected) => break,
+            },
+            Err(err) => {
+                return Err(SecretStoreError::backend(
+                    "failed while waiting for xdg-desktop-portal secret response",
+                    err,
+                ));
+            }
+        }
+    }
+    Err(SecretStoreError::backend_message(
+        "timed out waiting for xdg-desktop-portal secret response",
+        format!(
+            "portal request exceeded {} seconds",
+            FLATPAK_PORTAL_REQUEST_TIMEOUT_SECS
+        ),
+    ))
+}
+
+fn open_unlinked_temp_secret_file() -> SecretStoreResult<File> {
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        ".hbb-flatpak-secret-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|err| {
+            SecretStoreError::backend("failed to create xdg-desktop-portal secret buffer", err)
+        })?;
+    fs::remove_file(&path).map_err(|err| {
+        SecretStoreError::backend("failed to unlink xdg-desktop-portal secret buffer", err)
+    })?;
+    Ok(file)
+}
+
+fn dup_dbus_fd(fd: i32) -> SecretStoreResult<DbusOwnedFd> {
+    let dup_fd = unsafe { libc::dup(fd) };
+    if dup_fd < 0 {
+        return Err(SecretStoreError::backend(
+            "failed to duplicate xdg-desktop-portal secret file descriptor",
+            std::io::Error::last_os_error(),
+        ));
+    }
+    Ok(unsafe { DbusOwnedFd::new(dup_fd) })
+}
+
+// The Secret portal exposes a stable per-app secret but does not provide an
+// item store like Secret Service. For Flatpak, derive a stable 32-byte root
+// key from that app secret and use it directly for data encryption.
+fn derive_flatpak_secret(portal_secret: &[u8]) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(FLATPAK_SECRET_DERIVE_INFO);
+    hasher.update(b"\0");
+    hasher.update(portal_secret);
+    hasher.finalize().to_vec()
+}
+
+fn flatpak_secretbox_key() -> SecretStoreResult<secretbox::Key> {
+    let portal_secret = retrieve_flatpak_portal_secret()?;
+    let key = derive_flatpak_secret(&portal_secret);
+    secretbox::Key::from_slice(&key).ok_or_else(|| {
+        SecretStoreError::backend_message(
+            "failed to derive Flatpak crypto root key",
+            "sha256 output length mismatch",
+        )
+    })
+}
+
+fn linux_secretbox_key() -> SecretStoreResult<secretbox::Key> {
+    let keybuf = if is_flatpak() {
+        flatpak_secretbox_key()?.0.to_vec()
+    } else {
+        get_or_create_master_key()?
+    };
+    secretbox::Key::from_slice(&keybuf).ok_or_else(|| {
+        SecretStoreError::backend_message(
+            "failed to prepare Linux crypto root key",
+            format!("invalid key length {}", keybuf.len()),
+        )
+    })
+}
+
+fn get_or_create_master_key() -> SecretStoreResult<Vec<u8>> {
+    if let Some(key) = MASTER_KEY.get() {
+        return Ok(key.clone());
+    }
+
+    let service = APP_NAME.read().unwrap().clone();
+    let key = match ensure_expected_length(load_master_key_secret(&service), MASTER_KEY_LEN) {
+        Ok(key) => key,
+        Err(SecretStoreError::NotFound) => {
+            let key = sodiumoxide::randombytes::randombytes(MASTER_KEY_LEN);
+            if let Err(err) = store_master_key_secret(&service, &key) {
+                log::error!("Failed to persist generated master key: {err}");
+                return Err(err);
+            }
+            key
+        }
+        Err(err) => {
+            log::error!("Failed to load master key: {err}");
+            return Err(err);
+        }
+    };
+
+    let _ = MASTER_KEY.set(key.clone());
+    Ok(key)
+}
+
+fn ensure_expected_length(
+    secret: SecretStoreResult<Vec<u8>>,
+    expected_len: usize,
+) -> SecretStoreResult<Vec<u8>> {
+    let secret = secret?;
+    if secret.len() == expected_len {
+        Ok(secret)
+    } else {
+        Err(SecretStoreError::InvalidLength {
+            expected: expected_len,
+            actual: secret.len(),
+        })
+    }
+}
+
+pub fn encrypt_user_data(data: &[u8]) -> SecretStoreResult<Vec<u8>> {
+    sodiumoxide::init().map_err(|_| {
+        SecretStoreError::backend_message(
+            "failed to initialize sodium for Linux crypto root",
+            "sodium initialization failed",
+        )
+    })?;
+    let key = linux_secretbox_key()?;
+    let nonce = secretbox::gen_nonce();
+    let mut out = nonce.0.to_vec();
+    out.extend(secretbox::seal(data, &nonce, &key));
+    Ok(out)
+}
+
+pub fn decrypt_user_data(data: &[u8]) -> SecretStoreResult<Vec<u8>> {
+    sodiumoxide::init().map_err(|_| {
+        SecretStoreError::backend_message(
+            "failed to initialize sodium for Linux crypto root",
+            "sodium initialization failed",
+        )
+    })?;
+    if data.len() < secretbox::NONCEBYTES + secretbox::MACBYTES {
+        return Err(SecretStoreError::backend_message(
+            "failed to decrypt Linux user data",
+            "payload is too short",
+        ));
+    }
+    let key = linux_secretbox_key()?;
+    let nonce = secretbox::Nonce::from_slice(&data[..secretbox::NONCEBYTES]).ok_or_else(|| {
+        SecretStoreError::backend_message(
+            "failed to decrypt Linux user data",
+            "invalid nonce length",
+        )
+    })?;
+    secretbox::open(&data[secretbox::NONCEBYTES..], &nonce, &key).map_err(|_| {
+        SecretStoreError::backend_message(
+            "failed to decrypt Linux user data",
+            "secretbox authentication failed",
+        )
+    })
+}
+
+// Linux still needs a durable per-app root secret to back
+// `encrypt_user_data` / `decrypt_user_data` outside Flatpak.
+fn load_master_key_secret(service: &str) -> SecretStoreResult<Vec<u8>> {
+    if is_flatpak() {
+        return Err(SecretStoreError::backend_message(
+            "Flatpak uses direct crypto root backend",
+            format!(
+                "secret item ({service}, {MASTER_KEY_ACCOUNT}) is not exposed via portal secret"
+            ),
+        ));
+    }
+    let attrs = HashMap::from([("service", service), ("account", MASTER_KEY_ACCOUNT)]);
+    let ss = SecretService::connect(EncryptionType::Dh).map_err(|err| {
+        SecretStoreError::backend("failed to connect to Linux Secret Service", err)
+    })?;
+    let search = ss.search_items(attrs).map_err(|err| {
+        SecretStoreError::backend("failed to search Linux Secret Service items", err)
+    })?;
+    if !search.locked.is_empty() {
+        let item_refs: Vec<&Item> = search.locked.iter().collect();
+        ss.unlock_all(item_refs.as_slice()).map_err(|err| {
+            SecretStoreError::backend("failed to unlock Linux Secret Service items", err)
+        })?;
+    }
+
+    let mut saw_item = false;
+    let mut last_error = None;
+    for item in search.unlocked.iter().chain(search.locked.iter()) {
+        saw_item = true;
+        match item.get_secret() {
+            Ok(secret) => return Ok(secret),
+            Err(err) => last_error = Some(err.to_string()),
+        }
+    }
+
+    if saw_item {
+        Err(SecretStoreError::backend_message(
+            "failed to read secret from Linux Secret Service",
+            last_error.unwrap_or_else(|| "unknown secret read error".to_owned()),
+        ))
+    } else {
+        Err(SecretStoreError::NotFound)
+    }
+}
+
+fn store_master_key_secret(service: &str, secret: &[u8]) -> SecretStoreResult<()> {
+    if is_flatpak() {
+        return Err(SecretStoreError::backend_message(
+            "Flatpak uses direct crypto root backend",
+            format!(
+                "secret item ({service}, {MASTER_KEY_ACCOUNT}) cannot be persisted separately ({} bytes requested)",
+                secret.len()
+            ),
+        ));
+    }
+    let ss = SecretService::connect(EncryptionType::Dh).map_err(|err| {
+        SecretStoreError::backend("failed to connect to Linux Secret Service", err)
+    })?;
+    let collection = ss.get_default_collection().map_err(|err| {
+        SecretStoreError::backend("failed to get Linux Secret Service collection", err)
+    })?;
+    if collection.is_locked().map_err(|err| {
+        SecretStoreError::backend("failed to query Linux Secret Service lock state", err)
+    })? {
+        collection.unlock().map_err(|err| {
+            SecretStoreError::backend("failed to unlock Linux Secret Service collection", err)
+        })?;
+    }
+    let attrs = HashMap::from([("service", service), ("account", MASTER_KEY_ACCOUNT)]);
+    let label = format!("{service} {MASTER_KEY_ACCOUNT}");
+    collection
+        .create_item(&label, attrs, secret, true, "application/octet-stream")
+        .map_err(|err| {
+            SecretStoreError::backend("failed to create Linux Secret Service item", err)
+        })?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -568,5 +973,15 @@ mod tests {
         assert_eq!(shell_quote("`id`"), "'`id`'");
         assert_eq!(shell_quote("a && b"), "'a && b'");
         assert_eq!(shell_quote("a | b"), "'a | b'");
+    }
+
+    #[test]
+    fn test_flatpak_secret_derivation_is_stable() {
+        let a = derive_flatpak_secret(b"portal-secret");
+        let b = derive_flatpak_secret(b"portal-secret");
+        let c = derive_flatpak_secret(b"portal-secret-2");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(a.len(), 32);
     }
 }

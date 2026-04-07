@@ -2,6 +2,8 @@ use crate::ResultType;
 use osascript;
 use serde_derive::{Deserialize, Serialize};
 
+use super::SecretStoreResult;
+
 #[derive(Serialize)]
 struct AlertParams {
     title: String,
@@ -52,4 +54,12 @@ pub fn alert(
         buttons,
     })?;
     Ok(result.button)
+}
+
+pub fn encrypt_user_data(data: &[u8]) -> SecretStoreResult<Vec<u8>> {
+    crate::platform::apple::encrypt_user_data(data)
+}
+
+pub fn decrypt_user_data(data: &[u8]) -> SecretStoreResult<Vec<u8>> {
+    crate::platform::apple::decrypt_user_data(data)
 }

@@ -88,13 +88,29 @@ winapi = { version = "0.3", features = [
     "memoryapi",
     "sysinfoapi",
 ] }
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security_Credentials",
+    "Win32_Security_Cryptography",
+] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 osascript = "0.3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+dbus = "0.9.10"
+dbus-secret-service = { version = "=4.0.3", features = ["crypto-rust"] }
 sctk = { package = "smithay-client-toolkit", version = "0.20.0", default-features = false, features = [
     "calloop",
 ] }
 users = { version = "0.11" }
 x11 = "2.21"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+core-foundation = "0.10"
+security-framework = { version = "3", features = ["OSX_10_15"] }
+security-framework-sys = "2.17"

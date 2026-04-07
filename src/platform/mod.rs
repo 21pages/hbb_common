@@ -1,11 +1,64 @@
+use crate::anyhow;
+
+pub type SecretStoreResult<T> = Result<T, SecretStoreError>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum SecretStoreError {
+    #[error("secret not found")]
+    NotFound,
+    #[error("invalid secret length: expected {expected}, got {actual}")]
+    InvalidLength { expected: usize, actual: usize },
+    #[error("{context}: {source}")]
+    Backend {
+        context: &'static str,
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+impl SecretStoreError {
+    pub fn backend(context: &'static str, source: impl Into<anyhow::Error>) -> Self {
+        Self::Backend {
+            context,
+            source: source.into(),
+        }
+    }
+
+    pub fn backend_message(context: &'static str, message: impl Into<String>) -> Self {
+        Self::Backend {
+            context,
+            source: anyhow::Error::msg(message.into()),
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+pub mod android;
+#[cfg(target_os = "android")]
+pub(crate) use android::*;
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub mod apple;
+
+#[cfg(target_os = "ios")]
+pub mod ios;
+#[cfg(target_os = "ios")]
+pub(crate) use ios::*;
+
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(target_os = "linux")]
+pub(crate) use linux::*;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::*;
 
 #[cfg(target_os = "windows")]
 pub mod windows;
+#[cfg(target_os = "windows")]
+pub(crate) use windows::*;
 
 #[cfg(not(debug_assertions))]
 use crate::{config::Config, log};
