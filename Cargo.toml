@@ -98,6 +98,7 @@ windows = { version = "0.61", features = [
 osascript = "0.3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+dbus = "0.9.10"
 dbus-secret-service = { version = "=4.0.3", features = ["crypto-rust"] }
 sctk = { package = "smithay-client-toolkit", version = "0.20.0", default-features = false, features = [
     "calloop",
