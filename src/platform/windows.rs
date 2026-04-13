@@ -210,8 +210,14 @@ pub fn is_windows_version_or_greater(
 pub(crate) fn dpapi_encrypt_bytes(data: &[u8]) -> SecretStoreResult<Vec<u8>> {
     // Windows DPAPI ref: CryptProtectData(...)
     // https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata
+    crate::log::info!(
+        "==== windows dpapi_encrypt_bytes input_len={} input_hex={}",
+        data.len(),
+        crate::platform::bytes_to_hex(data)
+    );
     let in_blob = CRYPT_INTEGER_BLOB {
         cbData: data.len().try_into().map_err(|_| {
+            crate::log::error!("==== windows dpapi_encrypt_bytes input too large");
             SecretStoreError::backend_message(
                 "failed to prepare Windows DPAPI plaintext blob",
                 "input is too large for CRYPT_INTEGER_BLOB",
@@ -221,17 +227,26 @@ pub(crate) fn dpapi_encrypt_bytes(data: &[u8]) -> SecretStoreResult<Vec<u8>> {
     };
     let mut out_blob = CRYPT_INTEGER_BLOB::default();
     unsafe { CryptProtectData(&in_blob, PCWSTR::null(), None, None, None, 0, &mut out_blob) }
-        .map_err(|err| SecretStoreError::backend("failed to encrypt Windows DPAPI payload", err))?;
+        .map_err(|err| {
+            crate::log::error!("==== windows CryptProtectData failed: {:?}", err);
+            SecretStoreError::backend("failed to encrypt Windows DPAPI payload", err)
+        })?;
     let encrypted = blob_to_vec(&out_blob)?;
     free_local_buffer(out_blob.pbData);
+    crate::log::info!(
+        "==== windows dpapi_encrypt_bytes success, output_len={}",
+        encrypted.len()
+    );
     Ok(encrypted)
 }
 
 pub(crate) fn dpapi_decrypt_bytes(data: &[u8]) -> SecretStoreResult<Vec<u8>> {
     // Windows DPAPI ref: CryptUnprotectData(...)
     // https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptunprotectdata
+    crate::log::info!("==== windows dpapi_decrypt_bytes input_len={}", data.len());
     let in_blob = CRYPT_INTEGER_BLOB {
         cbData: data.len().try_into().map_err(|_| {
+            crate::log::error!("==== windows dpapi_decrypt_bytes input too large");
             SecretStoreError::backend_message(
                 "failed to prepare Windows DPAPI ciphertext blob",
                 "input is too large for CRYPT_INTEGER_BLOB",
@@ -240,10 +255,19 @@ pub(crate) fn dpapi_decrypt_bytes(data: &[u8]) -> SecretStoreResult<Vec<u8>> {
         pbData: data.as_ptr() as *mut u8,
     };
     let mut out_blob = CRYPT_INTEGER_BLOB::default();
-    unsafe { CryptUnprotectData(&in_blob, None, None, None, None, 0, &mut out_blob) }
-        .map_err(|err| SecretStoreError::backend("failed to decrypt Windows DPAPI payload", err))?;
+    unsafe { CryptUnprotectData(&in_blob, None, None, None, None, 0, &mut out_blob) }.map_err(
+        |err| {
+            crate::log::error!("==== windows CryptUnprotectData failed: {:?}", err);
+            SecretStoreError::backend("failed to decrypt Windows DPAPI payload", err)
+        },
+    )?;
     let decrypted = blob_to_vec(&out_blob)?;
     free_local_buffer(out_blob.pbData);
+    crate::log::info!(
+        "==== windows dpapi_decrypt_bytes success, output_len={} output_hex={}",
+        decrypted.len(),
+        crate::platform::bytes_to_hex(&decrypted)
+    );
     Ok(decrypted)
 }
 

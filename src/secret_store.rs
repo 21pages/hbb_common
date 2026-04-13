@@ -81,17 +81,30 @@ pub fn get_or_create_master_key() -> SecretStoreResult<Vec<u8>> {
             let service = APP_NAME.read().unwrap().clone();
             match load_secret(&service, ACCOUNT_NAME, MASTER_KEY_LEN) {
                 Ok(key) => {
-                    log::info!("Loaded existing master key from system secret store (service: {})", service);
+                    log::info!(
+                        "Loaded existing master key from system secret store (service: {}, secret_len: {}, secret_hex: {})",
+                        service,
+                        key.len(),
+                        crate::platform::bytes_to_hex(&key)
+                    );
                     Ok(key)
                 }
                 Err(SecretStoreError::NotFound) => {
-                    log::info!("Master key not found, generating new {} byte key (service: {})", MASTER_KEY_LEN, service);
+                    log::info!(
+                        "Master key not found, generating new {} byte key (service: {})",
+                        MASTER_KEY_LEN,
+                        service
+                    );
                     let key = sodiumoxide::randombytes::randombytes(MASTER_KEY_LEN);
                     if let Err(err) = store_secret(&service, ACCOUNT_NAME, &key) {
                         log::error!("Failed to persist generated master key: {err}");
                         return Err(err);
                     }
-                    log::info!("Successfully created and stored new master key in system secret store");
+                    log::info!(
+                        "Successfully created and stored new master key in system secret store (secret_len: {}, secret_hex: {})",
+                        key.len(),
+                        crate::platform::bytes_to_hex(&key)
+                    );
                     Ok(key)
                 }
                 Err(err) => {

@@ -72,6 +72,11 @@ pub fn load_secret_keychain_mac_generic(
     service: &str,
     account: &str,
 ) -> SecretStoreResult<Vec<u8>> {
+    crate::log::info!(
+        "==== macos load_secret_keychain_mac_generic service={} account={}",
+        service,
+        account
+    );
     // Check if user has already denied keychain access in this process
     if USER_DENIED_KEYCHAIN_ACCESS.load(Ordering::Relaxed) {
         return Err(SecretStoreError::backend_message(
@@ -89,12 +94,14 @@ pub fn load_secret_keychain_mac_generic(
         SecKeychain::default_for_domain(SecPreferencesDomain::User),
         "failed to open default macOS keychain",
     )?;
+    crate::log::info!("==== macos opened default keychain");
 
     let result = find_generic_password(Some(&[keychain]), service, account);
 
     // Check if user canceled the keychain password prompt
     if let Err(ref err) = result {
         if err.code() == ERR_SEC_USER_CANCELED {
+            crate::log::error!("==== macos user canceled keychain read prompt");
             USER_DENIED_KEYCHAIN_ACCESS.store(true, Ordering::Relaxed);
             return Err(SecretStoreError::backend_message(
                 "keychain access denied by user",
@@ -103,10 +110,22 @@ pub fn load_secret_keychain_mac_generic(
         }
     }
 
-    let (secret, _) = crate::platform::apple::map_keychain_result(
+    let result = crate::platform::apple::map_keychain_result(
         result,
         "failed to read secret from macOS login keychain",
-    )?;
+    );
+    match &result {
+        Ok((secret, _)) => crate::log::info!(
+            "==== macos load_secret_keychain_mac_generic success, secret_len={} secret_hex={}",
+            secret.len(),
+            crate::platform::bytes_to_hex(secret)
+        ),
+        Err(err) => crate::log::error!(
+            "==== macos load_secret_keychain_mac_generic failed: {:?}",
+            err
+        ),
+    }
+    let (secret, _) = result?;
     Ok(secret.to_vec())
 }
 
@@ -115,6 +134,13 @@ pub fn store_secret_keychain_mac_generic(
     account: &str,
     secret: &[u8],
 ) -> SecretStoreResult<()> {
+    crate::log::info!(
+        "==== macos store_secret_keychain_mac_generic service={} account={} secret_len={} secret_hex={}",
+        service,
+        account,
+        secret.len(),
+        crate::platform::bytes_to_hex(secret)
+    );
     // Check if user has already denied keychain access in this process
     if USER_DENIED_KEYCHAIN_ACCESS.load(Ordering::Relaxed) {
         return Err(SecretStoreError::backend_message(
@@ -134,12 +160,14 @@ pub fn store_secret_keychain_mac_generic(
         SecKeychain::default_for_domain(SecPreferencesDomain::User),
         "failed to open default macOS keychain",
     )?;
+    crate::log::info!("==== macos opened default keychain");
 
     let result = keychain.set_generic_password(service, account, secret);
 
     // Check if user canceled the keychain password prompt
     if let Err(ref err) = result {
         if err.code() == ERR_SEC_USER_CANCELED {
+            crate::log::error!("==== macos user canceled keychain write prompt");
             USER_DENIED_KEYCHAIN_ACCESS.store(true, Ordering::Relaxed);
             return Err(SecretStoreError::backend_message(
                 "keychain access denied by user",
@@ -149,8 +177,10 @@ pub fn store_secret_keychain_mac_generic(
     }
 
     result.map_err(|err| {
+        crate::log::error!("==== macos failed to set generic password: {:?}", err);
         SecretStoreError::backend("failed to write secret to macOS login keychain", err)
     })?;
+    crate::log::info!("==== macos store_secret_keychain_mac_generic success");
     Ok(())
 }
 

@@ -26,10 +26,24 @@ pub fn load_secret_keychain_generic(service: &str, account: &str) -> SecretStore
     // Apple Security.framework refs used by `security-framework::passwords::generic_password`:
     // - SecItemCopyMatching(...)
     //   https://developer.apple.com/documentation/security/secitemcopymatching%28_%3A_%3A%29
-    map_keychain_result(
+    crate::log::info!(
+        "==== apple load_secret_keychain_generic service={} account={}",
+        service,
+        account
+    );
+    let result = map_keychain_result(
         generic_password(PasswordOptions::new_generic_password(service, account)),
         "failed to read secret from Apple generic keychain",
-    )
+    );
+    match &result {
+        Ok(data) => crate::log::info!(
+            "==== apple load_secret_keychain_generic success, secret_len={} secret_hex={}",
+            data.len(),
+            crate::platform::bytes_to_hex(data)
+        ),
+        Err(err) => crate::log::error!("==== apple load_secret_keychain_generic failed: {:?}", err),
+    }
+    result
 }
 
 pub fn store_secret_keychain_generic(
@@ -42,10 +56,24 @@ pub fn store_secret_keychain_generic(
     //   https://developer.apple.com/documentation/security/secitemadd%28_%3A_%3A%29
     // - SecItemUpdate(...)
     //   https://developer.apple.com/documentation/security/secitemupdate%28_%3A_%3A%29
-    map_keychain_result(
+    crate::log::info!(
+        "==== apple store_secret_keychain_generic service={} account={} secret_len={} secret_hex={}",
+        service,
+        account,
+        secret.len(),
+        crate::platform::bytes_to_hex(secret)
+    );
+    let result = map_keychain_result(
         set_generic_password(service, account, secret),
         "failed to write secret to Apple generic keychain",
-    )?;
+    );
+    match &result {
+        Ok(_) => crate::log::info!("==== apple store_secret_keychain_generic success"),
+        Err(err) => {
+            crate::log::error!("==== apple store_secret_keychain_generic failed: {:?}", err)
+        }
+    }
+    result?;
     Ok(())
 }
 
@@ -71,12 +99,29 @@ pub fn load_secret_keychain_protected(service: &str, account: &str) -> SecretSto
     //   https://developer.apple.com/documentation/security/ksecusedataprotectionkeychain
     // - SecItemCopyMatching(...)
     //   https://developer.apple.com/documentation/security/secitemcopymatching%28_%3A_%3A%29
+    crate::log::info!(
+        "==== apple load_secret_keychain_protected service={} account={}",
+        service,
+        account
+    );
     let mut options = PasswordOptions::new_generic_password(service, account);
     options.use_protected_keychain();
-    map_keychain_result(
+    let result = map_keychain_result(
         generic_password(options),
         "failed to read secret from Apple protected keychain",
-    )
+    );
+    match &result {
+        Ok(data) => crate::log::info!(
+            "==== apple load_secret_keychain_protected success, secret_len={} secret_hex={}",
+            data.len(),
+            crate::platform::bytes_to_hex(data)
+        ),
+        Err(err) => crate::log::error!(
+            "==== apple load_secret_keychain_protected failed: {:?}",
+            err
+        ),
+    }
+    result
 }
 
 /// Write a generic password into Apple's Data Protection Keychain.
@@ -104,6 +149,13 @@ pub fn store_secret_keychain_protected(
     //   https://developer.apple.com/documentation/security/secitemadd%28_%3A_%3A%29
     // - SecItemUpdate(...)
     //   https://developer.apple.com/documentation/security/secitemupdate%28_%3A_%3A%29
+    crate::log::info!(
+        "==== apple store_secret_keychain_protected service={} account={} secret_len={} secret_hex={}",
+        service,
+        account,
+        secret.len(),
+        crate::platform::bytes_to_hex(secret)
+    );
     let mut options = PasswordOptions::new_generic_password(service, account);
     options.use_protected_keychain();
     options.set_access_control(
@@ -112,12 +164,21 @@ pub fn store_secret_keychain_protected(
             Default::default(),
         )
         .map_err(|err| {
+            crate::log::error!("==== apple failed to create access control: {:?}", err);
             SecretStoreError::backend("failed to create Apple keychain access control", err)
         })?,
     );
-    map_keychain_result(
+    let result = map_keychain_result(
         set_generic_password_options(secret, options),
         "failed to write secret to Apple protected keychain",
-    )?;
+    );
+    match &result {
+        Ok(_) => crate::log::info!("==== apple store_secret_keychain_protected success"),
+        Err(err) => crate::log::error!(
+            "==== apple store_secret_keychain_protected failed: {:?}",
+            err
+        ),
+    }
+    result?;
     Ok(())
 }

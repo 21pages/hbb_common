@@ -542,7 +542,7 @@ impl DbusSignalArgs for PortalRequestResponse {
 }
 
 #[inline]
-fn is_flatpak() -> bool {
+pub fn is_flatpak() -> bool {
     PathBuf::from("/.flatpak-info").exists()
 }
 
@@ -552,9 +552,12 @@ fn retrieve_flatpak_portal_secret() -> SecretStoreResult<Vec<u8>> {
     //   https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Secret.html
     // - org.freedesktop.portal.Request::Response
     //   https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Request.html
+    crate::log::info!("==== flatpak retrieve_flatpak_portal_secret start");
     let conn = DbusConnection::new_session().map_err(|err| {
+        crate::log::error!("==== flatpak failed to connect to session bus: {}", err);
         SecretStoreError::backend("failed to connect to xdg-desktop-portal session bus", err)
     })?;
+    crate::log::info!("==== flatpak connected to session bus");
 
     let sender: DbusBusName<'static> = FLATPAK_PORTAL_DEST.into();
     let rule = PortalRequestResponse::match_rule(Some(&sender), None).static_clone();
@@ -571,35 +574,49 @@ fn retrieve_flatpak_portal_secret() -> SecretStoreResult<Vec<u8>> {
             },
         )
         .map_err(|err| {
+            crate::log::error!(
+                "==== flatpak failed to subscribe to portal response: {}",
+                err
+            );
             SecretStoreError::backend(
                 "failed to subscribe to xdg-desktop-portal secret response",
                 err,
             )
         })?;
+    crate::log::info!("==== flatpak subscribed to portal response");
 
     let mut secret_file = open_unlinked_temp_secret_file()?;
+    crate::log::info!("==== flatpak opened temp secret file");
     let portal_fd = dup_dbus_fd(secret_file.as_raw_fd())?;
+    crate::log::info!("==== flatpak duplicated fd for portal");
     let portal_proxy = conn.with_proxy(
         FLATPAK_PORTAL_DEST,
         FLATPAK_PORTAL_PATH,
         Duration::from_millis(2000),
     );
+    crate::log::info!("==== flatpak calling RetrieveSecret method");
     let call_result: Result<(dbus::Path<'static>,), dbus::Error> = portal_proxy.method_call(
         FLATPAK_PORTAL_SECRET_INTERFACE,
         "RetrieveSecret",
         (portal_fd, DbusPropMap::new()),
     );
     if let Err(err) = call_result {
+        crate::log::error!("==== flatpak RetrieveSecret call failed: {}", err);
         let _ = conn.remove_match(match_token);
         return Err(SecretStoreError::backend(
             "failed to request xdg-desktop-portal secret",
             err,
         ));
     }
+    crate::log::info!("==== flatpak RetrieveSecret call succeeded, waiting for response");
 
     let response = wait_for_flatpak_portal_response(&conn, &rx);
     let _ = conn.remove_match(match_token);
     let response = response?;
+    crate::log::info!(
+        "==== flatpak received portal response: code={}",
+        response.response
+    );
     if response.response != 0 {
         let detail = if response.results.is_empty() {
             format!("request failed with response code {}", response.response)
@@ -610,6 +627,7 @@ fn retrieve_flatpak_portal_secret() -> SecretStoreResult<Vec<u8>> {
                 response.results.len()
             )
         };
+        crate::log::error!("==== flatpak portal response error: {}", detail);
         return Err(SecretStoreError::backend_message(
             "failed to retrieve xdg-desktop-portal secret",
             detail,
@@ -617,18 +635,30 @@ fn retrieve_flatpak_portal_secret() -> SecretStoreResult<Vec<u8>> {
     }
 
     secret_file.seek(SeekFrom::Start(0)).map_err(|err| {
+        crate::log::error!("==== flatpak failed to rewind secret file: {}", err);
         SecretStoreError::backend("failed to rewind xdg-desktop-portal secret buffer", err)
     })?;
     let mut secret = Vec::new();
     secret_file.read_to_end(&mut secret).map_err(|err| {
+        crate::log::error!("==== flatpak failed to read secret file: {}", err);
         SecretStoreError::backend("failed to read xdg-desktop-portal secret buffer", err)
     })?;
+    crate::log::info!(
+        "==== flatpak read secret from file, secret_len={} secret_hex={}",
+        secret.len(),
+        crate::platform::bytes_to_hex(&secret)
+    );
     if secret.is_empty() {
+        crate::log::error!("==== flatpak portal returned empty secret");
         return Err(SecretStoreError::backend_message(
             "failed to retrieve xdg-desktop-portal secret",
             "portal returned an empty secret buffer",
         ));
     }
+    crate::log::info!(
+        "==== flatpak retrieve_flatpak_portal_secret success, secret_len={}",
+        secret.len()
+    );
     Ok(secret)
 }
 
@@ -719,7 +749,15 @@ fn derive_flatpak_secret(service: &str, account: &str, portal_secret: &[u8]) -> 
 
 fn load_flatpak_secret_store_key(service: &str, account: &str) -> SecretStoreResult<Vec<u8>> {
     let portal_secret = retrieve_flatpak_portal_secret()?;
-    Ok(derive_flatpak_secret(service, account, &portal_secret))
+    let secret = derive_flatpak_secret(service, account, &portal_secret);
+    crate::log::info!(
+        "==== flatpak load_flatpak_secret_store_key success service={} account={} secret_len={} secret_hex={}",
+        service,
+        account,
+        secret.len(),
+        crate::platform::bytes_to_hex(&secret)
+    );
+    Ok(secret)
 }
 
 fn store_flatpak_secret_store_key(
@@ -727,10 +765,23 @@ fn store_flatpak_secret_store_key(
     account: &str,
     secret: &[u8],
 ) -> SecretStoreResult<()> {
+    crate::log::info!(
+        "==== flatpak store_flatpak_secret_store_key service={} account={} secret_len={} secret_hex={}",
+        service,
+        account,
+        secret.len(),
+        crate::platform::bytes_to_hex(secret)
+    );
     let expected = load_flatpak_secret_store_key(service, account)?;
     if secret == expected.as_slice() {
+        crate::log::info!("==== flatpak store_flatpak_secret_store_key success");
         Ok(())
     } else {
+        crate::log::error!(
+            "==== flatpak store_flatpak_secret_store_key mismatch expected_len={} expected_hex={}",
+            expected.len(),
+            crate::platform::bytes_to_hex(&expected)
+        );
         Err(SecretStoreError::backend_message(
             "Flatpak secret backend is read-only",
             "requested secret does not match the portal-derived secret",
@@ -744,18 +795,33 @@ pub fn load_secret_store_key(service: &str, account: &str) -> SecretStoreResult<
     //   https://specifications.freedesktop.org/secret-service/latest/org.freedesktop.Secret.Service.html
     // - org.freedesktop.Secret.Item.GetSecret
     //   https://specifications.freedesktop.org/secret-service-spec/latest/org.freedesktop.Secret.Item.html
+    crate::log::info!(
+        "==== linux load_secret_store_key service={} account={}",
+        service,
+        account
+    );
     let attrs = HashMap::from([("service", service), ("account", account)]);
     let ss = SecretService::connect(EncryptionType::Dh).map_err(|err| {
+        crate::log::error!("==== linux failed to connect to Secret Service: {}", err);
         SecretStoreError::backend("failed to connect to Linux Secret Service", err)
     })?;
+    crate::log::info!("==== linux connected to Secret Service");
     let search = ss.search_items(attrs).map_err(|err| {
+        crate::log::error!("==== linux failed to search items: {}", err);
         SecretStoreError::backend("failed to search Linux Secret Service items", err)
     })?;
+    crate::log::info!(
+        "==== linux search found unlocked={} locked={}",
+        search.unlocked.len(),
+        search.locked.len()
+    );
     if !search.locked.is_empty() {
         let item_refs: Vec<&Item> = search.locked.iter().collect();
         ss.unlock_all(item_refs.as_slice()).map_err(|err| {
+            crate::log::error!("==== linux failed to unlock items: {}", err);
             SecretStoreError::backend("failed to unlock Linux Secret Service items", err)
         })?;
+        crate::log::info!("==== linux unlocked {} items", search.locked.len());
     }
 
     let mut saw_item = false;
@@ -763,17 +829,30 @@ pub fn load_secret_store_key(service: &str, account: &str) -> SecretStoreResult<
     for item in search.unlocked.iter().chain(search.locked.iter()) {
         saw_item = true;
         match item.get_secret() {
-            Ok(secret) => return Ok(secret),
+            Ok(secret) => {
+                crate::log::info!(
+                    "==== linux load_secret_store_key success, secret_len={} secret_hex={}",
+                    secret.len(),
+                    crate::platform::bytes_to_hex(&secret)
+                );
+                return Ok(secret);
+            }
             Err(err) => last_error = Some(err.to_string()),
         }
     }
 
     if saw_item {
+        let detail = last_error.unwrap_or_else(|| "unknown secret read error".to_owned());
+        crate::log::error!(
+            "==== linux load_secret_store_key failed to read secret: {}",
+            detail
+        );
         Err(SecretStoreError::backend_message(
             "failed to read secret from Linux Secret Service",
-            last_error.unwrap_or_else(|| "unknown secret read error".to_owned()),
+            detail,
         ))
     } else {
+        crate::log::info!("==== linux load_secret_store_key not found");
         Err(SecretStoreError::NotFound)
     }
 }
@@ -788,26 +867,43 @@ pub fn store_secret_store_key(
     //   https://specifications.freedesktop.org/secret-service/latest/org.freedesktop.Secret.Service.html
     // - org.freedesktop.Secret.Collection.CreateItem
     //   https://specifications.freedesktop.org/secret-service-spec/latest/org.freedesktop.Secret.Collection.html
+    crate::log::info!(
+        "==== linux store_secret_store_key service={} account={} secret_len={} secret_hex={}",
+        service,
+        account,
+        secret.len(),
+        crate::platform::bytes_to_hex(secret)
+    );
     let ss = SecretService::connect(EncryptionType::Dh).map_err(|err| {
+        crate::log::error!("==== linux failed to connect to Secret Service: {}", err);
         SecretStoreError::backend("failed to connect to Linux Secret Service", err)
     })?;
+    crate::log::info!("==== linux connected to Secret Service");
     let collection = ss.get_default_collection().map_err(|err| {
+        crate::log::error!("==== linux failed to get default collection: {}", err);
         SecretStoreError::backend("failed to get Linux Secret Service collection", err)
     })?;
+    crate::log::info!("==== linux got default collection");
     if collection.is_locked().map_err(|err| {
+        crate::log::error!("==== linux failed to query lock state: {}", err);
         SecretStoreError::backend("failed to query Linux Secret Service lock state", err)
     })? {
+        crate::log::info!("==== linux collection is locked, unlocking");
         collection.unlock().map_err(|err| {
+            crate::log::error!("==== linux failed to unlock collection: {}", err);
             SecretStoreError::backend("failed to unlock Linux Secret Service collection", err)
         })?;
+        crate::log::info!("==== linux collection unlocked");
     }
     let attrs = HashMap::from([("service", service), ("account", account)]);
     let label = format!("{service} {account}");
     collection
         .create_item(&label, attrs, secret, true, "application/octet-stream")
         .map_err(|err| {
+            crate::log::error!("==== linux failed to create item: {}", err);
             SecretStoreError::backend("failed to create Linux Secret Service item", err)
         })?;
+    crate::log::info!("==== linux store_secret_store_key success");
     Ok(())
 }
 

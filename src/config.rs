@@ -805,6 +805,27 @@ impl Config {
         "".into()
     }
 
+    /// Get an additional log directory when logs should also be mirrored into the
+    /// configuration directory.
+    #[allow(unreachable_code)]
+    pub fn extra_log_path() -> Option<PathBuf> {
+        #[cfg(target_os = "linux")]
+        {
+            if crate::platform::is_flatpak() {
+                let path = Self::path("");
+                std::fs::create_dir_all(&path).ok();
+                return Some(path);
+            }
+        }
+        #[cfg(target_os = "ios")]
+        {
+            let path = Self::path("");
+            std::fs::create_dir_all(&path).ok();
+            return Some(path);
+        }
+        None
+    }
+
     pub fn ipc_path(postfix: &str) -> String {
         #[cfg(windows)]
         {

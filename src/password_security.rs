@@ -127,8 +127,8 @@ impl Cipher for UuidCipher {
     }
 
     fn decrypt(&self, data: &[u8], _is_string: bool) -> Result<Vec<u8>, CryptError> {
-        let payload = base64::decode(data, base64::Variant::Original)
-            .map_err(|_| CryptError::Base64Error)?;
+        let payload =
+            base64::decode(data, base64::Variant::Original).map_err(|_| CryptError::Base64Error)?;
         symmetric_crypt_00_uuid(&payload, false).map_err(|_| CryptError::DecryptionFailed)
     }
 }
@@ -358,7 +358,8 @@ fn symmetric_crypt_00_uuid(data: &[u8], encrypt: bool) -> Result<Vec<u8>, CryptE
                 if pk != uuid {
                     let mut keybuf = pk;
                     keybuf.resize(secretbox::KEYBYTES, 0);
-                    let pk_key = secretbox::Key(keybuf.try_into().map_err(|_| CryptError::InvalidData)?);
+                    let pk_key =
+                        secretbox::Key(keybuf.try_into().map_err(|_| CryptError::InvalidData)?);
                     return secretbox::open(data, &nonce, &pk_key)
                         .map_err(|_| CryptError::DecryptionFailed);
                 }
@@ -373,8 +374,8 @@ fn symmetric_crypt_00_uuid(data: &[u8], encrypt: bool) -> Result<Vec<u8>, CryptE
 pub fn symmetric_crypt_02_user(data: &[u8], encrypt: bool) -> Result<Vec<u8>, CryptError> {
     if encrypt {
         #[cfg(target_os = "windows")]
-        let payload = crate::platform::dpapi_encrypt_bytes(data)
-            .map_err(|_| CryptError::EncryptionFailed)?;
+        let payload =
+            crate::platform::dpapi_encrypt_bytes(data).map_err(|_| CryptError::EncryptionFailed)?;
         #[cfg(not(target_os = "windows"))]
         let payload = crate::secret_store::secretbox_encrypt_user_data_raw(data)?;
 
@@ -387,8 +388,7 @@ pub fn symmetric_crypt_02_user(data: &[u8], encrypt: bool) -> Result<Vec<u8>, Cr
 
         #[cfg(target_os = "windows")]
         {
-            crate::platform::dpapi_decrypt_bytes(payload)
-                .map_err(|_| CryptError::DecryptionFailed)
+            crate::platform::dpapi_decrypt_bytes(payload).map_err(|_| CryptError::DecryptionFailed)
         }
         #[cfg(not(target_os = "windows"))]
         {
@@ -702,7 +702,10 @@ mod test {
         let encrypted = secretbox::seal(data, &nonce, &pk_key);
 
         let decrypted = symmetric_crypt_00_uuid(&encrypted, false);
-        assert!(decrypted.is_ok(), "Decryption with pk fallback should succeed");
+        assert!(
+            decrypted.is_ok(),
+            "Decryption with pk fallback should succeed"
+        );
         assert_eq!(decrypted.unwrap(), data);
     }
 
@@ -714,32 +717,28 @@ mod test {
 
         let old_encoded_str = encrypt_str_or_original("old-to-new", VERSION_00_UUID, max_len);
         assert_eq!(&old_encoded_str[..VERSION_LEN], VERSION_00_UUID);
-        let (decrypted, succ, store) =
-            decrypt_str_or_original(&old_encoded_str, VERSION_02_USER);
+        let (decrypted, succ, store) = decrypt_str_or_original(&old_encoded_str, VERSION_02_USER);
         assert_eq!(decrypted, "old-to-new");
         assert!(succ);
         assert!(store);
 
         let new_encoded_str = encrypt_str_or_original("new-to-old", VERSION_00_UUID, max_len);
         assert_eq!(&new_encoded_str[..VERSION_LEN], VERSION_00_UUID);
-        let (decrypted, succ, store) =
-            decrypt_str_or_original(&new_encoded_str, VERSION_00_UUID);
+        let (decrypted, succ, store) = decrypt_str_or_original(&new_encoded_str, VERSION_00_UUID);
         assert_eq!(decrypted, "new-to-old");
         assert!(succ);
         assert!(!store);
 
         let old_encoded_vec = encrypt_vec_or_original(b"old-to-new-vec", VERSION_00_UUID, max_len);
         assert_eq!(&old_encoded_vec[..VERSION_LEN], VERSION_00_UUID.as_bytes());
-        let (decrypted, succ, store) =
-            decrypt_vec_or_original(&old_encoded_vec, VERSION_02_USER);
+        let (decrypted, succ, store) = decrypt_vec_or_original(&old_encoded_vec, VERSION_02_USER);
         assert_eq!(decrypted, b"old-to-new-vec");
         assert!(succ);
         assert!(store);
 
         let new_encoded_vec = encrypt_vec_or_original(b"new-to-old-vec", VERSION_00_UUID, max_len);
         assert_eq!(&new_encoded_vec[..VERSION_LEN], VERSION_00_UUID.as_bytes());
-        let (decrypted, succ, store) =
-            decrypt_vec_or_original(&new_encoded_vec, VERSION_00_UUID);
+        let (decrypted, succ, store) = decrypt_vec_or_original(&new_encoded_vec, VERSION_00_UUID);
         assert_eq!(decrypted, b"new-to-old-vec");
         assert!(succ);
         assert!(!store);

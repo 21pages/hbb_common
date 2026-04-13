@@ -26,12 +26,18 @@ const CIPHER_DECRYPT_MODE: i32 = 2;
 const GCM_TAG_BITS: i32 = 128;
 
 pub fn load_secret(service: &str, account: &str) -> SecretStoreResult<Vec<u8>> {
+    crate::log::info!(
+        "==== android load_secret start service={} account={}",
+        service,
+        account
+    );
     let ctx = ndk_context::android_context();
     let jvm = unsafe { JavaVM::from_raw(ctx.vm().cast()) }
         .map_err(|err| SecretStoreError::backend("failed to attach to Android JVM", err))?;
     let mut env = jvm
         .attach_current_thread()
         .map_err(|err| SecretStoreError::backend("failed to attach Android thread to JVM", err))?;
+    crate::log::info!("==== android thread attached to JVM");
     let context = unsafe { JObject::from_raw(ctx.context() as jni::sys::jobject) };
     let store_name = store_name(service);
     let prefs = shared_preferences(&mut env, &context, &store_name).ok_or_else(|| {
@@ -40,7 +46,16 @@ pub fn load_secret(service: &str, account: &str) -> SecretStoreResult<Vec<u8>> {
             store_name.clone(),
         )
     })?;
+    crate::log::info!(
+        "==== android SharedPreferences opened store_name={}",
+        store_name
+    );
     if !preferences_contains(&mut env, &prefs, account)? {
+        crate::log::info!(
+            "==== android secret not found service={} account={}",
+            service,
+            account
+        );
         return Err(SecretStoreError::NotFound);
     }
     let encoded = preferences_get_string(&mut env, &prefs, account).ok_or_else(|| {
@@ -49,30 +64,49 @@ pub fn load_secret(service: &str, account: &str) -> SecretStoreResult<Vec<u8>> {
             format!("missing string value for key {account}"),
         )
     })?;
+    crate::log::info!("==== android got encoded secret, length={}", encoded.len());
     let payload = BASE64_STANDARD
         .decode(encoded)
         .map_err(|err| SecretStoreError::backend("failed to decode Android secret payload", err))?;
+    crate::log::info!("==== android decoded payload, length={}", payload.len());
     let key = get_or_create_secret_key(&mut env, service).ok_or_else(|| {
         SecretStoreError::backend_message(
             "failed to access Android Keystore key",
             format!("missing alias {}", store_name),
         )
     })?;
-    decrypt(&mut env, &key, &payload).ok_or_else(|| {
+    let secret = decrypt(&mut env, &key, &payload).ok_or_else(|| {
+        crate::log::error!("==== android decrypt failed");
         SecretStoreError::backend_message(
             "failed to decrypt Android secret payload",
             format!("alias {}", store_name),
         )
-    })
+    })?;
+    crate::log::info!(
+        "==== android load_secret success service={} account={} secret_len={} secret_hex={}",
+        service,
+        account,
+        secret.len(),
+        crate::platform::bytes_to_hex(&secret)
+    );
+    Ok(secret)
 }
 
 pub fn store_secret(service: &str, account: &str, secret: &[u8]) -> SecretStoreResult<()> {
+    crate::log::info!(
+        "==== android store_secret start service={} account={} secret_len={} secret_hex={}",
+        service,
+        account,
+        secret.len(),
+        crate::platform::bytes_to_hex(secret)
+    );
     let ctx = ndk_context::android_context();
     let jvm = unsafe { JavaVM::from_raw(ctx.vm().cast()) }
         .map_err(|err| SecretStoreError::backend("failed to attach to Android JVM", err))?;
     let mut env = jvm
         .attach_current_thread()
         .map_err(|err| SecretStoreError::backend("failed to attach Android thread to JVM", err))?;
+    crate::log::info!("==== android thread attached to JVM");
     let context = unsafe { JObject::from_raw(ctx.context() as jni::sys::jobject) };
     let store_name = store_name(service);
     let key = get_or_create_secret_key(&mut env, service).ok_or_else(|| {
@@ -82,12 +116,15 @@ pub fn store_secret(service: &str, account: &str, secret: &[u8]) -> SecretStoreR
         )
     })?;
     let encrypted = encrypt(&mut env, &key, secret).ok_or_else(|| {
+        crate::log::error!("==== android encrypt failed");
         SecretStoreError::backend_message(
             "failed to encrypt Android secret payload",
             format!("alias {}", store_name),
         )
     })?;
+    crate::log::info!("==== android encrypted payload, length={}", encrypted.len());
     let encoded = BASE64_STANDARD.encode(encrypted);
+    crate::log::info!("==== android base64 encoded, length={}", encoded.len());
     let prefs = shared_preferences(&mut env, &context, &store_name).ok_or_else(|| {
         SecretStoreError::backend_message(
             "failed to open Android SharedPreferences",
@@ -95,11 +132,14 @@ pub fn store_secret(service: &str, account: &str, secret: &[u8]) -> SecretStoreR
         )
     })?;
     preferences_put_string(&mut env, &prefs, account, &encoded).ok_or_else(|| {
+        crate::log::error!("==== android failed to persist to SharedPreferences");
         SecretStoreError::backend_message(
             "failed to persist Android secret payload",
             format!("key {account}"),
         )
-    })
+    })?;
+    crate::log::info!("==== android store_secret success");
+    Ok(())
 }
 
 fn store_name(service: &str) -> String {
@@ -290,9 +330,11 @@ fn get_or_create_secret_key<'local>(
         .l()
         .ok()?;
     if !key.is_null() {
+        crate::log::info!("==== android found existing Keystore key alias={}", alias);
         return Some(key);
     }
 
+    crate::log::info!("==== android generating new Keystore key alias={}", alias);
     let alias_string = env.new_string(&alias).ok()?;
     let builder = env
         .new_object(

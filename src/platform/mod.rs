@@ -99,3 +99,23 @@ where
         libc::signal(libc::SIGSEGV, breakdown_signal_handler as _);
     }
 }
+
+#[cfg(target_os = "linux")]
+pub fn is_flatpak() -> bool {
+    linux::is_flatpak()
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn is_flatpak() -> bool {
+    false
+}
+
+pub(crate) fn bytes_to_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
+}
