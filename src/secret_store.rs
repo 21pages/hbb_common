@@ -5,7 +5,7 @@ use once_cell::sync::OnceCell;
 
 const MASTER_KEY_LEN: usize = sodiumoxide::crypto::secretbox::KEYBYTES;
 #[cfg(not(target_os = "windows"))]
-const ACCOUNT_NAME: &str = "master_key";
+const ACCOUNT_NAME: &str = "secret";
 const USER_DATA_MAGIC_HEADER: [u8; 16] = [
     0xbe, 0xb6, 0x88, 0x39, 0x41, 0x15, 0x4b, 0xe7, 0x8d, 0x94, 0x10, 0x23, 0x59, 0x8f, 0x8b, 0x24,
 ];
@@ -81,17 +81,26 @@ pub fn get_or_create_master_key() -> SecretStoreResult<Vec<u8>> {
             let service = APP_NAME.read().unwrap().clone();
             match load_secret(&service, ACCOUNT_NAME, MASTER_KEY_LEN) {
                 Ok(key) => {
-                    log::info!("Loaded existing master key from system secret store (service: {})", service);
+                    log::info!(
+                        "Loaded existing master key from system secret store (service: {})",
+                        service
+                    );
                     Ok(key)
                 }
                 Err(SecretStoreError::NotFound) => {
-                    log::info!("Master key not found, generating new {} byte key (service: {})", MASTER_KEY_LEN, service);
+                    log::info!(
+                        "Master key not found, generating new {} byte key (service: {})",
+                        MASTER_KEY_LEN,
+                        service
+                    );
                     let key = sodiumoxide::randombytes::randombytes(MASTER_KEY_LEN);
                     if let Err(err) = store_secret(&service, ACCOUNT_NAME, &key) {
                         log::error!("Failed to persist generated master key: {err}");
                         return Err(err);
                     }
-                    log::info!("Successfully created and stored new master key in system secret store");
+                    log::info!(
+                        "Successfully created and stored new master key in system secret store"
+                    );
                     Ok(key)
                 }
                 Err(err) => {

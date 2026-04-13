@@ -110,6 +110,71 @@ pub fn load_secret_keychain_mac_generic(
     Ok(secret.to_vec())
 }
 
+pub fn load_secret_keychain_mac_generic_silent(
+    service: &str,
+    account: &str,
+) -> SecretStoreResult<Vec<u8>> {
+    // Check if user has already denied keychain access in this process
+    if USER_DENIED_KEYCHAIN_ACCESS.load(Ordering::Relaxed) {
+        return Err(SecretStoreError::backend_message(
+            "keychain access denied by user",
+            "User previously denied keychain password prompt in this session",
+        ));
+    }
+
+    // Disable user interaction to prevent any prompts
+    use core_foundation_sys::base::OSStatus;
+
+    extern "C" {
+        fn SecKeychainSetUserInteractionAllowed(state: u8) -> OSStatus;
+        fn SecKeychainGetUserInteractionAllowed(state: *mut u8) -> OSStatus;
+    }
+
+    unsafe {
+        // Save current state
+        let mut old_state: u8 = 0;
+        SecKeychainGetUserInteractionAllowed(&mut old_state);
+
+        // Disable user interaction
+        SecKeychainSetUserInteractionAllowed(0);
+
+        // Try to read the password
+        let keychain = match crate::platform::apple::map_keychain_result(
+            SecKeychain::default_for_domain(SecPreferencesDomain::User),
+            "failed to open default macOS keychain",
+        ) {
+            Ok(k) => k,
+            Err(e) => {
+                // Restore state before returning
+                SecKeychainSetUserInteractionAllowed(old_state);
+                return Err(e);
+            }
+        };
+
+        let result = find_generic_password(Some(&[keychain]), service, account);
+
+        // Restore user interaction state
+        SecKeychainSetUserInteractionAllowed(old_state);
+
+        // Check if user canceled (shouldn't happen since we disabled interaction)
+        if let Err(ref err) = result {
+            if err.code() == ERR_SEC_USER_CANCELED {
+                USER_DENIED_KEYCHAIN_ACCESS.store(true, Ordering::Relaxed);
+                return Err(SecretStoreError::backend_message(
+                    "keychain access denied by user",
+                    "User canceled keychain password prompt",
+                ));
+            }
+        }
+
+        let (secret, _) = crate::platform::apple::map_keychain_result(
+            result,
+            "failed to read secret from macOS login keychain",
+        )?;
+        Ok(secret.to_vec())
+    }
+}
+
 pub fn store_secret_keychain_mac_generic(
     service: &str,
     account: &str,
@@ -154,6 +219,70 @@ pub fn store_secret_keychain_mac_generic(
     Ok(())
 }
 
+pub fn store_secret_keychain_mac_generic_accessible(
+    service: &str,
+    account: &str,
+    secret: &[u8],
+) -> SecretStoreResult<()> {
+    // Check if user has already denied keychain access in this process
+    if USER_DENIED_KEYCHAIN_ACCESS.load(Ordering::Relaxed) {
+        return Err(SecretStoreError::backend_message(
+            "keychain access denied by user",
+            "User previously denied keychain password prompt in this session",
+        ));
+    }
+
+    // Use the `security` command-line tool to store the password with access control
+    // that allows all applications to access the keychain item without prompting.
+    // The `-A` flag allows all applications, and `-U` updates if the item already exists.
+    use std::process::Command;
+
+    let secret_str = String::from_utf8_lossy(secret);
+
+    let output = Command::new("security")
+        .arg("add-generic-password")
+        .arg("-a")
+        .arg(account)
+        .arg("-s")
+        .arg(service)
+        .arg("-w")
+        .arg(secret_str.as_ref())
+        .arg("-A") // Allow all applications to access this item
+        .arg("-U") // Update if item already exists
+        .output()
+        .map_err(|e| {
+            SecretStoreError::backend_message(
+                "failed to execute security command",
+                &format!("Could not run security command: {}", e),
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Check if user canceled the keychain password prompt
+        // errSecUserCanceled = -128, but the security command returns it as exit code 128
+        if output.status.code() == Some(128) {
+            USER_DENIED_KEYCHAIN_ACCESS.store(true, Ordering::Relaxed);
+            return Err(SecretStoreError::backend_message(
+                "keychain access denied by user",
+                "User canceled keychain password prompt",
+            ));
+        }
+
+        return Err(SecretStoreError::backend_message(
+            "failed to write secret to macOS login keychain",
+            &format!(
+                "security command failed with exit code {:?}: {}",
+                output.status.code(),
+                stderr
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
 /// RustDesk's default macOS path intentionally uses the traditional keychain.
 ///
 /// The `apple::load_secret_keychain_protected` helper targets macOS's Data
@@ -162,11 +291,11 @@ pub fn store_secret_keychain_mac_generic(
 /// are valid. For the desktop app we want the broadly compatible login
 /// keychain-backed behavior here.
 pub fn load_secret(service: &str, account: &str) -> SecretStoreResult<Vec<u8>> {
-    load_secret_keychain_mac_generic(service, account)
+    load_secret_keychain_mac_generic_silent(service, account)
 }
 
 /// See `load_secret`: the default macOS store path deliberately stays on the
 /// legacy keychain instead of the protected-data store.
 pub fn store_secret(service: &str, account: &str, secret: &[u8]) -> SecretStoreResult<()> {
-    store_secret_keychain_mac_generic(service, account, secret)
+    store_secret_keychain_mac_generic_accessible(service, account, secret)
 }
