@@ -100,7 +100,6 @@ osascript = "0.3"
 core-foundation = "0.10"
 core-foundation-sys = "0.8"
 security-framework-sys = "2.15"
-hex = "0.4"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus = "0.9.10"

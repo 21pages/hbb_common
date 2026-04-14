@@ -1,12 +1,9 @@
 use crate::secret_store::{SecretStoreError, SecretStoreResult};
 use crate::ResultType;
 use osascript;
-use core_foundation_sys::base::OSStatus;
 use security_framework::{
-    base::Error as SecurityError,
     os::macos::{
         keychain::{SecKeychain, SecPreferencesDomain},
-        passwords::find_generic_password,
     },
 };
 use serde_derive::{Deserialize, Serialize};
@@ -19,11 +16,6 @@ const ERR_SEC_USER_CANCELED: i32 = -128;
 
 // Global flag to track if user has denied keychain access in this process
 static USER_DENIED_KEYCHAIN_ACCESS: AtomicBool = AtomicBool::new(false);
-
-unsafe extern "C" {
-    fn SecKeychainSetUserInteractionAllowed(state: u8) -> OSStatus;
-    fn SecKeychainGetUserInteractionAllowed(state: *mut u8) -> OSStatus;
-}
 
 #[derive(Serialize)]
 struct AlertParams {
@@ -84,47 +76,6 @@ pub fn load_secret_keychain_mac_generic(
     load_secret_keychain_mac_generic_silent(service, account)
 }
 
-fn check_keychain_interaction_status(
-    status: OSStatus,
-    context: &'static str,
-) -> SecretStoreResult<()> {
-    if status == 0 {
-        Ok(())
-    } else {
-        Err(SecretStoreError::backend(
-            context,
-            SecurityError::from_code(status),
-        ))
-    }
-}
-
-fn with_keychain_interaction_disabled<T>(
-    f: impl FnOnce() -> SecretStoreResult<T>,
-) -> SecretStoreResult<T> {
-    unsafe {
-        let mut old_state: u8 = 0;
-        check_keychain_interaction_status(
-            SecKeychainGetUserInteractionAllowed(&mut old_state),
-            "failed to query macOS keychain interaction state",
-        )?;
-        check_keychain_interaction_status(
-            SecKeychainSetUserInteractionAllowed(0),
-            "failed to disable macOS keychain interaction",
-        )?;
-
-        let result = f();
-        let restore_status = SecKeychainSetUserInteractionAllowed(old_state);
-        if restore_status != 0 {
-            return Err(SecretStoreError::backend(
-                "failed to restore macOS keychain interaction state",
-                SecurityError::from_code(restore_status),
-            ));
-        }
-
-        result
-    }
-}
-
 pub fn load_secret_keychain_mac_generic_silent(
     service: &str,
     account: &str,
@@ -137,39 +88,140 @@ pub fn load_secret_keychain_mac_generic_silent(
         ));
     }
 
-    with_keychain_interaction_disabled(|| {
-        // macOS Keychain Services refs:
-        // - SecKeychainCopyDomainDefault(...)
-        //   https://developer.apple.com/documentation/security/seckeychaincopydomaindefault%28_%3A_%3A%29
-        // - SecKeychainFindGenericPassword(...)
-        //   https://developer.apple.com/documentation/security/seckeychainfindgenericpassword%28_%3A_%3A_%3A_%3A_%3A_%3A_%3A_%3A%29
-        let keychain = match crate::platform::apple::map_keychain_result(
-            SecKeychain::default_for_domain(SecPreferencesDomain::User),
-            "failed to open default macOS keychain",
-        ) {
+    use core_foundation::{
+        base::TCFType,
+        boolean::CFBoolean,
+        data::CFData,
+        dictionary::CFDictionary,
+        string::CFString,
+    };
+    use core_foundation_sys::base::CFTypeRef;
+    use security_framework_sys::keychain_item::SecItemCopyMatching;
+    use security_framework_sys::base::SecKeychainRef;
+
+    // Declare SecKeychainGetStatus
+    extern "C" {
+        fn SecKeychainGetStatus(keychainRef: SecKeychainRef, keychainStatus: *mut u32) -> i32;
+    }
+
+    unsafe {
+        // First check if the default keychain is locked
+        let keychain = match SecKeychain::default_for_domain(SecPreferencesDomain::User) {
             Ok(k) => k,
-            Err(e) => return Err(e),
+            Err(e) => {
+                return Err(SecretStoreError::backend_message(
+                    "keychain access failed",
+                    &format!("Failed to get default keychain: {:?}", e),
+                ));
+            }
         };
 
-        let result = find_generic_password(Some(&[keychain]), service, account);
+        let mut status_flags: u32 = 0;
+        let status = SecKeychainGetStatus(keychain.as_concrete_TypeRef(), &mut status_flags);
 
-        // Check if user canceled (shouldn't happen since we disabled interaction)
-        if let Err(ref err) = result {
-            if err.code() == ERR_SEC_USER_CANCELED {
-                USER_DENIED_KEYCHAIN_ACCESS.store(true, Ordering::Relaxed);
+        log::debug!("SecKeychainGetStatus returned status: {}, flags: {}", status, status_flags);
+
+        if status != 0 {
+            return Err(SecretStoreError::backend_message(
+                "keychain access failed",
+                &format!("Failed to get keychain status: {}", status),
+            ));
+        }
+
+        // kSecUnlockStateStatus = 1
+        // If bit 0 is not set, keychain is locked
+        const K_SEC_UNLOCK_STATE_STATUS: u32 = 1;
+        if (status_flags & K_SEC_UNLOCK_STATE_STATUS) == 0 {
+            return Err(SecretStoreError::backend_message(
+                "keychain is locked",
+                "The keychain is locked and cannot be accessed without user interaction",
+            ));
+        }
+        // Use the actual keychain constants
+        // kSecClass = "class"
+        // kSecClassGenericPassword = "genp"
+        // kSecAttrService = "svce"
+        // kSecAttrAccount = "acct"
+        // kSecReturnData = "r_Data"
+        // kSecUseAuthenticationUI = "u_AuthenticationUI"
+        // kSecUseAuthenticationUIFail = "fail"
+
+        let class_key = CFString::from_static_string("class");
+        let service_key = CFString::from_static_string("svce");
+        let account_key = CFString::from_static_string("acct");
+        let return_data_key = CFString::from_static_string("r_Data");
+        let auth_ui_key = CFString::from_static_string("u_AuthenticationUI");
+
+        let class_value = CFString::from_static_string("genp");
+        let service_value = CFString::new(service);
+        let account_value = CFString::new(account);
+        let return_data_value = CFBoolean::true_value();
+        let auth_ui_value = CFString::from_static_string("fail");
+
+        let query = CFDictionary::from_CFType_pairs(&[
+            (class_key.as_CFType(), class_value.as_CFType()),
+            (service_key.as_CFType(), service_value.as_CFType()),
+            (account_key.as_CFType(), account_value.as_CFType()),
+            (return_data_key.as_CFType(), return_data_value.as_CFType()),
+            (auth_ui_key.as_CFType(), auth_ui_value.as_CFType()),
+        ]);
+
+        let mut result: CFTypeRef = std::ptr::null();
+        let status = SecItemCopyMatching(query.as_concrete_TypeRef(), &mut result);
+
+        log::debug!("SecItemCopyMatching returned status: {}", status);
+
+        if status == 0 {
+            // Success
+            if !result.is_null() {
+                let data = CFData::wrap_under_create_rule(result as _);
+                return Ok(data.bytes().to_vec());
+            } else {
                 return Err(SecretStoreError::backend_message(
-                    "keychain access denied by user",
-                    "User canceled keychain password prompt",
+                    "keychain read failed",
+                    "SecItemCopyMatching returned null result",
                 ));
             }
         }
 
-        let (secret, _) = crate::platform::apple::map_keychain_result(
-            result,
-            "failed to read secret from macOS login keychain",
-        )?;
-        Ok(secret.to_vec())
-    })
+        // Handle errors
+        if status == ERR_SEC_USER_CANCELED {
+            USER_DENIED_KEYCHAIN_ACCESS.store(true, Ordering::Relaxed);
+            return Err(SecretStoreError::backend_message(
+                "keychain access denied by user",
+                "User canceled keychain password prompt",
+            ));
+        }
+
+        // errSecItemNotFound = -25300
+        if status == -25300 {
+            return Err(SecretStoreError::backend_message(
+                "secret not found",
+                &format!("No keychain item found for service '{}' and account '{}'", service, account),
+            ));
+        }
+
+        // errSecAuthFailed = -25293
+        if status == -25293 {
+            return Err(SecretStoreError::backend_message(
+                "keychain access denied",
+                "Application does not have permission to access this keychain item",
+            ));
+        }
+
+        // errSecInteractionNotAllowed = -25308
+        if status == -25308 {
+            return Err(SecretStoreError::backend_message(
+                "keychain interaction required",
+                "Keychain access requires user interaction but it was disabled",
+            ));
+        }
+
+        Err(SecretStoreError::backend_message(
+            "keychain read failed",
+            &format!("SecItemCopyMatching failed with error code: {}", status),
+        ))
+    }
 }
 
 pub fn store_secret_keychain_mac_generic(
@@ -229,9 +281,8 @@ pub fn store_secret_keychain_mac_generic_accessible(
         ));
     }
 
-    // Use the `security` command-line tool to store the password with access control
-    // that allows all applications to access the keychain item without prompting.
-    // The `-A` flag allows all applications, and `-U` updates if the item already exists.
+    // Use the `security` command-line tool to store the password.
+    // Without the `-A` flag, only the current application can access this item.
     use std::process::Command;
 
     let secret_str = String::from_utf8_lossy(secret);
@@ -244,7 +295,6 @@ pub fn store_secret_keychain_mac_generic_accessible(
         .arg(service)
         .arg("-w")
         .arg(secret_str.as_ref())
-        .arg("-A") // Allow all applications to access this item
         .arg("-U") // Update if item already exists
         .output()
         .map_err(|e| {
