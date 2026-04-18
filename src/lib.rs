@@ -443,24 +443,48 @@ pub fn init_log(_is_async: bool, _name: &str) -> Option<flexi_logger::LoggerHand
             // https://docs.rs/flexi_logger/latest/flexi_logger/error_info/index.html#write
             // though async logger more efficient, but it also causes more problems, disable it for now
             let mut path = config::Config::log_path();
+            let mut extra_path = config::Config::extra_log_path();
             #[cfg(target_os = "android")]
             if !config::Config::get_home().exists() {
                 return;
             }
             if !_name.is_empty() {
                 path.push(_name);
+                if let Some(extra_path) = extra_path.as_mut() {
+                    extra_path.push(_name);
+                }
             }
             use flexi_logger::*;
             if let Ok(x) = Logger::try_with_env_or_str(
                 "debug,reqwest=warn,rustls=warn,webrtc-sctp=warn,webrtc=warn",
             ) {
-                logger_holder = x
-                    .log_to_file(FileSpec::default().directory(path))
-                    .write_mode(if _is_async {
-                        WriteMode::Async
-                    } else {
-                        WriteMode::Direct
-                    })
+                let write_mode = if _is_async {
+                    WriteMode::Async
+                } else {
+                    WriteMode::Direct
+                };
+                let logger = match extra_path.filter(|extra_path| extra_path != &path) {
+                    Some(extra_path) => match writers::FileLogWriter::builder(
+                        FileSpec::default().directory(extra_path),
+                    )
+                    .write_mode(write_mode)
+                    .rotate(
+                        Criterion::Age(Age::Day),
+                        Naming::Timestamps,
+                        Cleanup::KeepLogFiles(31),
+                    )
+                    .try_build()
+                    {
+                        Ok(extra_writer) => x.log_to_file_and_writer(
+                            FileSpec::default().directory(path),
+                            Box::new(extra_writer),
+                        ),
+                        Err(_) => x.log_to_file(FileSpec::default().directory(path)),
+                    },
+                    None => x.log_to_file(FileSpec::default().directory(path)),
+                };
+                logger_holder = logger
+                    .write_mode(write_mode)
                     .format(opt_format)
                     .rotate(
                         Criterion::Age(Age::Day),

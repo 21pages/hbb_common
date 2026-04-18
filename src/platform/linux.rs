@@ -515,7 +515,7 @@ const FLATPAK_PORTAL_TIMEOUT_MS: u64 = 1_000;
 const FLATPAK_PORTAL_RESULT_TIMEOUT_MS: u64 = FLATPAK_PORTAL_TIMEOUT_MS + 1_000;
 
 #[inline]
-fn is_flatpak() -> bool {
+pub fn is_flatpak() -> bool {
     PathBuf::from("/.flatpak-info").exists()
 }
 
