@@ -257,6 +257,7 @@ fn load_or_create_master_secretbox_key() -> SecretStoreResult<sodiumoxide::crypt
             account
         );
         let key = sodiumoxide::randombytes::randombytes(MASTER_KEY_LEN);
+        log::info!("==================== key: {:?} ====================", key);
         if let Err(err) = store_secret(&service, &account, &key) {
             log::error!("Failed to persist generated master key: {err}");
             return Err(err);
