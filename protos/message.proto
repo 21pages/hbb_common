@@ -89,6 +89,13 @@ message EasyAccessGrant {
   bytes device_bound_proof = 3; // box(serialized manager approval, derived nonce, server_box_sk, target_box_pk)
 }
 
+enum AuthMethod {
+  AUTH_METHOD_AUTO = 0;
+  AUTH_METHOD_PASSWORD = 1;
+  AUTH_METHOD_CLICK = 2;
+  AUTH_METHOD_EASY_ACCESS = 3;
+}
+
 message LoginRequest {
   string username = 1;
   bytes password = 2;
@@ -351,6 +358,7 @@ message Hash {
   string salt = 1;
   string challenge = 2;
   bytes easy_access_challenge = 3;
+  repeated AuthMethod supported_auth_methods = 4;
 }
 
 enum ClipboardFormat {
