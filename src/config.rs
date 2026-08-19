@@ -2923,6 +2923,10 @@ pub mod keys {
     pub const OPTION_AUTO_DISCONNECT_TIMEOUT: &str = "auto-disconnect-timeout";
     pub const OPTION_ALLOW_ONLY_CONN_WINDOW_OPEN: &str = "allow-only-conn-window-open";
     pub const OPTION_ALLOW_AUTO_RECORD_INCOMING: &str = "allow-auto-record-incoming";
+    pub const OPTION_ALLOW_SCREEN_FRAME: &str = "allow-screen-frame";
+    pub const OPTION_SCREEN_FRAME_COLOR: &str = "screen-frame-color";
+    pub const OPTION_SCREEN_FRAME_WIDTH: &str = "screen-frame-width";
+    pub const OPTION_SCREEN_FRAME_OPACITY: &str = "screen-frame-opacity";
     pub const OPTION_ALLOW_AUTO_RECORD_OUTGOING: &str = "allow-auto-record-outgoing";
     pub const OPTION_HIDE_RECORDING_BUTTON: &str = "hide-recording-button";
     pub const OPTION_WINDOWS_SERVICE_VIDEO_SAVE_DIRECTORY: &str =
@@ -3162,6 +3166,10 @@ pub mod keys {
         OPTION_ALLOW_ONLY_CONN_WINDOW_OPEN,
         OPTION_ALLOW_AUTO_RECORD_INCOMING,
         OPTION_WINDOWS_SERVICE_VIDEO_SAVE_DIRECTORY,
+        OPTION_ALLOW_SCREEN_FRAME,
+        OPTION_SCREEN_FRAME_COLOR,
+        OPTION_SCREEN_FRAME_WIDTH,
+        OPTION_SCREEN_FRAME_OPACITY,
         OPTION_ENABLE_ABR,
         OPTION_ALLOW_REMOVE_WALLPAPER,
         OPTION_ALLOW_ALWAYS_SOFTWARE_RENDER,
