@@ -1,4 +1,4 @@
-use crate::{bail, bytes_codec::BytesCodec, ResultType, config::Socks5Server, proxy::Proxy};
+use crate::{bail, bytes_codec::BytesCodec, config::Socks5Server, proxy::Proxy, ResultType};
 use anyhow::Context as AnyhowCtx;
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::{SinkExt, StreamExt};
@@ -62,7 +62,10 @@ impl DerefMut for DynTcpStream {
     }
 }
 
-pub(crate) fn new_socket(addr: std::net::SocketAddr, reuse: bool) -> Result<TcpSocket, std::io::Error> {
+pub(crate) fn new_socket(
+    addr: std::net::SocketAddr,
+    reuse: bool,
+) -> Result<TcpSocket, std::io::Error> {
     let socket = match addr {
         std::net::SocketAddr::V4(..) => TcpSocket::new_v4()?,
         std::net::SocketAddr::V6(..) => TcpSocket::new_v6()?,
@@ -142,6 +145,10 @@ impl FramedStream {
 
     pub fn set_raw(&mut self) {
         self.0.codec_mut().set_raw();
+        self.2 = None;
+    }
+
+    pub fn set_framed_raw(&mut self) {
         self.2 = None;
     }
 

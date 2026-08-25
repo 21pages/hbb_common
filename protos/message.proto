@@ -55,6 +55,7 @@ message DisplayInfo {
 message PortForward {
   string host = 1;
   int32 port = 2;
+  bool heartbeat = 3;
 }
 
 message FileTransfer {
@@ -150,6 +151,7 @@ message LoginResponse {
     PeerInfo peer_info = 2;
   }
   bool enable_trusted_devices = 3;
+  bool port_forward_heartbeat = 4;
 }
 
 message TouchScaleUpdate {

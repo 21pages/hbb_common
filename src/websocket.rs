@@ -212,6 +212,11 @@ impl WsFramedStream {
     }
 
     #[inline]
+    pub fn set_framed_raw(&mut self) {
+        self.set_raw();
+    }
+
+    #[inline]
     pub async fn from_tcp_stream(stream: TcpStream, addr: SocketAddr) -> ResultType<Self> {
         let ws_stream =
             WebSocketStream::from_raw_socket(MaybeTlsStream::Plain(stream), Role::Client, None)

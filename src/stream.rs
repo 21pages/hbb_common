@@ -1,6 +1,6 @@
-use crate::{config, tcp, websocket, ResultType};
 #[cfg(feature = "webrtc")]
 use crate::webrtc;
+use crate::{config, tcp, websocket, ResultType};
 use sodiumoxide::crypto::secretbox::Key;
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
@@ -31,6 +31,22 @@ impl Stream {
             Stream::WebRTC(s) => s.set_raw(),
             Stream::WebSocket(s) => s.set_raw(),
             Stream::Tcp(s) => s.set_raw(),
+        }
+    }
+
+    #[inline]
+    pub fn set_framed_raw(&mut self) -> bool {
+        match self {
+            #[cfg(feature = "webrtc")]
+            Stream::WebRTC(_) => false,
+            Stream::WebSocket(s) => {
+                s.set_framed_raw();
+                true
+            }
+            Stream::Tcp(s) => {
+                s.set_framed_raw();
+                true
+            }
         }
     }
 
