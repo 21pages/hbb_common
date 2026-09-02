@@ -2948,6 +2948,7 @@ pub mod keys {
     pub const OPTION_PRESET_DEVICE_NAME: &str = "preset-device-name";
     pub const OPTION_PRESET_NOTE: &str = "preset-note";
     pub const OPTION_ENABLE_DIRECTX_CAPTURE: &str = "enable-directx-capture";
+    pub const OPTION_ALLOW_HDR_CAPTURE: &str = "allow-hdr-capture";
     pub const OPTION_ENABLE_ANDROID_SOFTWARE_ENCODING_HALF_SCALE: &str =
         "enable-android-software-encoding-half-scale";
     pub const OPTION_ENABLE_TRUSTED_DEVICES: &str = "enable-trusted-devices";
@@ -3185,6 +3186,7 @@ pub mod keys {
         OPTION_PRESET_DEVICE_NAME,
         OPTION_PRESET_NOTE,
         OPTION_ENABLE_DIRECTX_CAPTURE,
+        OPTION_ALLOW_HDR_CAPTURE,
         OPTION_ENABLE_ANDROID_SOFTWARE_ENCODING_HALF_SCALE,
         OPTION_ENABLE_TRUSTED_DEVICES,
         OPTION_RELAY_SERVER,
