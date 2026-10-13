@@ -21,6 +21,8 @@ use tokio::{
 use tokio_socks::IntoTargetAddr;
 use tokio_util::codec::Framed;
 
+mod crypto_diagnostics;
+
 pub trait TcpStreamTrait: AsyncRead + AsyncWrite + Unpin {}
 pub struct DynTcpStream(pub Box<dyn TcpStreamTrait + Send + Sync>);
 
@@ -195,7 +197,10 @@ impl FramedStream {
         if let Some(key) = self.2.as_mut() {
             msg = key.enc(&msg);
         }
-        self.send_bytes(bytes::Bytes::from(msg)).await?;
+        crypto_diagnostics::frame(self, "tx", &msg);
+        let result = self.send_bytes(bytes::Bytes::from(msg)).await;
+        crypto_diagnostics::sent(self, &result);
+        result?;
         Ok(())
     }
 
@@ -213,8 +218,10 @@ impl FramedStream {
     pub async fn next(&mut self) -> Option<Result<BytesMut, Error>> {
         let mut res = self.0.next().await;
         if let Some(Ok(bytes)) = res.as_mut() {
+            crypto_diagnostics::frame(self, "rx", bytes);
             if let Some(key) = self.2.as_mut() {
                 if let Err(err) = key.dec(bytes) {
+                    crypto_diagnostics::decryption_failed(self, bytes);
                     return Some(Err(err));
                 }
             }
@@ -233,6 +240,7 @@ impl FramedStream {
 
     pub fn set_key(&mut self, key: Key) {
         self.2 = Some(Encrypt::new(key));
+        crypto_diagnostics::key_set(self);
     }
 
     pub fn set_key_split(
@@ -242,6 +250,7 @@ impl FramedStream {
         t: &KxTranscript,
     ) -> ResultType<()> {
         self.2 = Some(Encrypt::new_split(key, is_initiator, t)?);
+        crypto_diagnostics::key_set(self);
         Ok(())
     }
 
