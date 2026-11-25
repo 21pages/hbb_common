@@ -2489,7 +2489,7 @@ impl UserDefaultConfig {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             keys::OPTION_VIEW_STYLE => self.get_string(key, "original", vec!["adaptive"]),
             keys::OPTION_KEYBOARD_MODE => {
-                self.get_string(key, "map", vec!["legacy", "translate"])
+                self.get_string(key, "", vec!["map", "legacy", "translate"])
             }
             keys::OPTION_SCROLL_STYLE => {
                 self.get_string(key, "scrollauto", vec!["scrolledge", "scrollbar"])
@@ -2513,6 +2513,11 @@ impl UserDefaultConfig {
     }
 
     pub fn set(&mut self, key: String, value: String) {
+        const OPTIONS_TO_SAVE_WHEN_EMPTY: &[&str] = &[
+            // An empty keyboard mode is the user's explicit choice of automatic mode.
+            keys::OPTION_KEYBOARD_MODE,
+        ];
+
         if !is_option_can_save(
             &OVERWRITE_DISPLAY_SETTINGS,
             &key,
@@ -2524,7 +2529,7 @@ impl UserDefaultConfig {
             }
             return;
         }
-        if value.is_empty() {
+        if value.is_empty() && !OPTIONS_TO_SAVE_WHEN_EMPTY.contains(&key.as_str()) {
             self.options.remove(&key);
         } else {
             self.options.insert(key, value);
@@ -3823,11 +3828,31 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_mode_defaults_to_map() {
+    fn keyboard_mode_distinguishes_unset_from_map() {
         let _guard = CONFIG_STATE_TEST_LOCK.lock().unwrap();
-        assert_eq!(
-            UserDefaultConfig::default().get(keys::OPTION_KEYBOARD_MODE),
-            "map"
-        );
+        let key = keys::OPTION_KEYBOARD_MODE;
+        let mut display = UserDefaultConfig::default();
+        assert_eq!(display.get(key), "");
+        for mode in ["", "map"] {
+            display.options.insert(key.into(), mode.into());
+            assert_eq!(display.get(key), mode);
+        }
+    }
+
+    #[test]
+    fn explicit_default_keyboard_mode_survives_reload() {
+        let _guard = CONFIG_STATE_TEST_LOCK.lock().unwrap();
+        let _file = ConfigFileRestoreGuard::new(Config::file_("_default"));
+        let key = keys::OPTION_KEYBOARD_MODE;
+        DEFAULT_DISPLAY_SETTINGS
+            .write()
+            .unwrap()
+            .insert(key.into(), "translate".into());
+        let inherited = UserDefaultConfig::default().get(key);
+        UserDefaultConfig::load().set(key.into(), String::new());
+        let selected = UserDefaultConfig::load().get(key);
+        DEFAULT_DISPLAY_SETTINGS.write().unwrap().remove(key);
+        assert_eq!(inherited, "translate");
+        assert_eq!(selected, "");
     }
 }
